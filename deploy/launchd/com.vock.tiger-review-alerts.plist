@@ -1,0 +1,30 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>com.vock.tiger-review-alerts</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/Users/vock/Codes/tiger-review/.venv/bin/python</string>
+    <string>-m</string>
+    <string>tiger_review</string>
+    <string>alerts</string>
+  </array>
+  <key>WorkingDirectory</key><string>/Users/vock/Codes/tiger-review</string>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key><string>/usr/bin:/bin:/usr/sbin:/sbin</string>
+    <key>PYTHONUNBUFFERED</key><string>1</string>
+  </dict>
+  <key>StartCalendarInterval</key>
+  <array>
+    <dict><key>Weekday</key><integer>1</integer><key>Hour</key><integer>9</integer><key>Minute</key><integer>25</integer></dict>
+    <dict><key>Weekday</key><integer>2</integer><key>Hour</key><integer>9</integer><key>Minute</key><integer>25</integer></dict>
+    <dict><key>Weekday</key><integer>3</integer><key>Hour</key><integer>9</integer><key>Minute</key><integer>25</integer></dict>
+    <dict><key>Weekday</key><integer>4</integer><key>Hour</key><integer>9</integer><key>Minute</key><integer>25</integer></dict>
+    <dict><key>Weekday</key><integer>5</integer><key>Hour</key><integer>9</integer><key>Minute</key><integer>25</integer></dict>
+  </array>
+  <key>StandardOutPath</key><string>/Users/vock/Codes/tiger-review/data/logs/alerts.launchd.out.log</string>
+  <key>StandardErrorPath</key><string>/Users/vock/Codes/tiger-review/data/logs/alerts.launchd.err.log</string>
+</dict>
+</plist>

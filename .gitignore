@@ -1,0 +1,16 @@
+# 环境与缓存
+.venv/
+__pycache__/
+.pytest_cache/
+.DS_Store
+*.log
+
+# 个人数据：成交、持仓、账户、选票备注、状态、行情缓存、日志——一律不进仓库
+data/*
+# 研究结果里只保留复盘卡片要用的胜算查询表（不含个人数据）
+!data/research/
+data/research/*
+!data/research/spike_lookup.json
+
+# 复盘与研究报告含个人盈亏，不进仓库
+reports/
