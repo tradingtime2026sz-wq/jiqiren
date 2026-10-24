@@ -329,6 +329,13 @@ def cmd_fupan(args) -> None:
     print(pull() if args.pull else push(args.message or "手动同步复盘"))
 
 
+def cmd_leaders(args) -> None:
+    """时代领袖发言监听：跑一轮，有新的就推 Telegram 群（launchd 每 5 分钟调一次）。"""
+    from .leaders import run_once
+    n = run_once(dry=args.dry_run, window_min=args.window)
+    print(f"{'将推' if args.dry_run else '已推'} {n} 条")
+
+
 def main() -> None:
     ap = argparse.ArgumentParser(prog="tiger_review")
     sub = ap.add_subparsers(dest="cmd", required=True)
@@ -349,7 +356,10 @@ def main() -> None:
     al.add_argument("--dry-run", action="store_true", help="只打印，不发 Telegram、不写去重状态")
     al.add_argument("--once", action="store_true", help="实盘只读取一轮，忽略常驻时段限制")
     dm = sub.add_parser("demo"); dm.add_argument("--start", default="2026-06-15"); dm.add_argument("--end", default="2026-09-25")
+    ld = sub.add_parser("leaders", help="时代领袖发言监听：抓一轮 Google News，新的推 Telegram 群")
+    ld.add_argument("--dry-run", action="store_true", help="只打印，不发、不记去重")
+    ld.add_argument("--window", type=int, default=90, help="只看最近多少分钟（默认 90）")
     args = ap.parse_args()
     {"doctor": cmd_doctor, "sync": cmd_sync, "review": cmd_review, "day": cmd_day, "demo": cmd_demo,
      "auto": cmd_auto, "spike": cmd_spike, "note": cmd_note, "alerts": cmd_alerts,
-     "fupan": cmd_fupan}[args.cmd](args)
+     "fupan": cmd_fupan, "leaders": cmd_leaders}[args.cmd](args)
