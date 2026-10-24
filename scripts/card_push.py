@@ -135,6 +135,32 @@ def send(text: str, pdf: Path, caption: str, dry: bool) -> bool:
     return ok_all
 
 
+MULTI_GATE_UNTIL = "09:05"   # 多日卡两个前提到这个点还没齐就不再等，照发并注明
+
+
+def multi_ready(d: Path) -> tuple[bool, str]:
+    """多日卡发出的两个前提（WQ 2026-10-24 定：TMTB 早报出来之后再发，内容才有效）。
+
+    ① 裁定版：同目录 grok_cards.json 里至少一张卡有 routing.judge（作战卡运行器可能在裁定前先出过一版）；
+    ② TMTB 早报已到：当天 tmtb/ 下有 morning-wrap 原文，或裁定那边已写 tmtb_brief.json。
+    返回 (是否齐, 缺什么)。
+    """
+    missing = []
+    gc = d / "grok_cards.json"
+    try:
+        cards = json.loads(gc.read_text(encoding="utf-8")) if gc.exists() else []
+        if isinstance(cards, dict):
+            cards = cards.get("cards") or []
+        if not any((c.get("routing") or {}).get("judge") for c in cards if isinstance(c, dict)):
+            missing.append("裁定")
+    except (OSError, ValueError):
+        missing.append("裁定")
+    tmtb_in = any((d / "tmtb").glob("*morning-wrap*")) or (d / "tmtb_brief.json").exists()
+    if not tmtb_in:
+        missing.append("TMTB 早报")
+    return (not missing, "、".join(missing))
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--date", help="美东日期，默认今天")
@@ -150,9 +176,16 @@ def main() -> int:
         for key, (src, pdf) in want.items():
             if key in state or not (d / src).exists() or not (d / pdf).exists():
                 continue
+            gate_note = ""
+            if key == "multi" and not a.date:
+                ready, lack = multi_ready(d)
+                if not ready:
+                    if datetime.now(ET).strftime("%H:%M") < MULTI_GATE_UNTIL:
+                        continue                   # 等裁定 / TMTB 早报，到点再说
+                    gate_note = f"\n（{MULTI_GATE_UNTIL} 仍缺{lack}，先发这版）"
             time.sleep(3)                      # 等文件写完
             if key == "multi":
-                text = multi_text(json.loads((d / src).read_text(encoding="utf-8")), day)
+                text = multi_text(json.loads((d / src).read_text(encoding="utf-8")), day) + gate_note
                 cap = f"盘前作战卡（多日）{day} 完整版"
             else:
                 text = intraday_text((d / src).read_text(encoding="utf-8"), day)
