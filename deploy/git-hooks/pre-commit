@@ -1,0 +1,33 @@
+#!/bin/sh
+# 机器人仓库（jiqiren）是公开的：拦截个人数据、报告和凭据进入提交。
+# 本文件进仓库，所以不写任何具体号码：老虎账户号与 tiger_id 在检查时从本机
+# ~/.config/tiger/tiger_openapi_config.properties 现读；其他个人敏感词放本机
+# ~/.config/jiqiren/hook_patterns（一行一个正则，不进仓库）。
+bad_paths=$(git diff --cached --name-only | grep -E '^(data/|reports/)' | grep -v '^data/research/spike_lookup.json$')
+if [ -n "$bad_paths" ]; then
+  echo "拒绝提交：这些是个人数据或报告，仓库是公开的："; echo "$bad_paths"; exit 1
+fi
+added=$(git diff --cached -U0 | grep '^+' | grep -v '^+++')
+generic='ghp_[A-Za-z0-9]{10,}|github_pat_[A-Za-z0-9_]{20,}|bot[0-9]{6,}:[A-Za-z0-9_-]{20,}|-----BEGIN [A-Z ]*PRIVATE KEY|private_key_pk[18]='
+if printf '%s\n' "$added" | grep -E -q "$generic"; then
+  echo "拒绝提交：改动里有密钥或凭据样式的内容，仓库是公开的。"; exit 1
+fi
+props="$HOME/.config/tiger/tiger_openapi_config.properties"
+if [ -f "$props" ]; then
+  for key in account tiger_id; do
+    val=$(grep -E "^$key=" "$props" | head -1 | cut -d= -f2- | tr -d '[:space:]')
+    if [ -n "$val" ] && printf '%s\n' "$added" | grep -F -q "$val"; then
+      echo "拒绝提交：改动里有老虎账户标识（$key），仓库是公开的。"; exit 1
+    fi
+  done
+fi
+pat="$HOME/.config/jiqiren/hook_patterns"
+if [ -f "$pat" ]; then
+  while IFS= read -r p; do
+    [ -z "$p" ] && continue
+    if printf '%s\n' "$added" | grep -E -q "$p"; then
+      echo "拒绝提交：改动里有本机标记的个人敏感内容。"; exit 1
+    fi
+  done < "$pat"
+fi
+exit 0

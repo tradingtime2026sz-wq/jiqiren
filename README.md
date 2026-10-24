@@ -9,7 +9,7 @@
 | 盘中提醒 | `python -m tiger_review alerts` | Telegram 机器人推送恐慌 Put、接针提醒，见 `docs/盘中提醒-v0.md`（WQ 主会话维护） |
 | 部署 | `deploy/launchd/` | 两个定时任务的模板 |
 
-个人数据（成交、持仓、账户、备注、报告）和凭据都不在仓库里：凭据在 `~/.config/tiger/`、`~/.config/telegram/`，数据在本机 `data/` 与 `reports/`。
+个人数据（成交、持仓、账户、备注、报告）和凭据都不在这个公开仓库里：凭据在 `~/.config/tiger/`、`~/.config/telegram/`；复盘报告、选票备注和复盘状态放私有仓库 jiqiren-fupan（`python -m tiger_review fupan` 上传、`--pull` 取回）。
 
 ---
 

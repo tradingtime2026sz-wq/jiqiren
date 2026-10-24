@@ -35,3 +35,6 @@ done
 if nc -z -w 2 127.0.0.1 11111 2>/dev/null; then echo "富途 OpenD：在跑"; else echo "富途 OpenD：没在跑（装好并登录，端口 11111）"; fi
 echo "任务："; launchctl list | grep -E 'tiger-review|card-telegram' || true
 echo "装完后在旧机器上执行 bootout 停掉同名任务，避免两台都跑。试跑：$ROOT/.venv/bin/python -m tiger_review alerts --dry-run --once"
+
+# 4. 复盘这一侧（私有复盘仓库、状态取回、公开仓库提交检查），由复盘会话维护
+if [ -x "$ROOT/deploy/fupan_setup.sh" ]; then bash "$ROOT/deploy/fupan_setup.sh"; fi

@@ -188,3 +188,12 @@ def test_quick_round_trip_inside_opening_window():
     assert pytest.approx(c.structure["open_debit"], abs=0.01) == 162 * 40 + 162 * 0.65
     rec = att.analyze(c)
     assert rec["ret"] > 2
+
+
+def test_fupan_merge_keeps_later_state_and_unions_notes():
+    from tiger_review.fupan_sync import merge_notes, merge_state
+    a, b = {"last_fill_ms": 100, "last_review_date": "2026-10-22"}, {"last_fill_ms": 200}
+    assert merge_state(a, b) == b and merge_state(b, a) == b
+    assert merge_state(None, a) == a and merge_state(a, None) == a
+    n = merge_notes({"X 1": {"选票前提": "本机"}}, {"X 1": {"选票前提": "远端"}, "Y 2": {"进场逻辑": "远端"}})
+    assert n["X 1"]["选票前提"] == "本机" and "Y 2" in n

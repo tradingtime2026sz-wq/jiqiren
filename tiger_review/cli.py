@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import argparse
 import json
+from pathlib import Path
 from datetime import date, datetime, timedelta
 
 from .config import ET, PROPS_DIR, REPORTS_DIR, Settings
@@ -139,11 +140,27 @@ def cmd_demo(args) -> None:
     print(_write(res, recs, meta, "演示-期权复盘"))
 
 
-def _notify(title: str, text: str) -> None:
+def _notify(title: str, text: str, attach: str | None = None) -> None:
+    """复盘通知：本机系统弹窗 + Telegram 只发 WQ 私聊（chat_id 第一行），可附当天复盘报告。
+
+    复盘含个人盈亏，WQ 2026-10-24 定只发私聊、不发群。
+    """
     import subprocess
+    import sys
     t = text.replace('"', "'").replace("\\", "/")[:230]
     subprocess.run(["/usr/bin/osascript", "-e", f'display notification "{t}" with title "{title}"'],
                    check=False, capture_output=True)
+    sender = Path(__file__).resolve().parent.parent / "scripts" / "tg_send.py"
+    if not sender.exists() or not (Path.home() / ".config/telegram/bot_token").exists():
+        return
+    cmd = [sys.executable, str(sender), "--only-first"]
+    if attach and Path(attach).exists():
+        cmd += ["--file", attach, "--caption", f"{title}\n{text}"[:1000]]
+    else:
+        cmd += ["--text", f"{title}\n{text}"]
+    r = subprocess.run(cmd, check=False, capture_output=True, timeout=120)
+    if r.returncode != 0:
+        _log("Telegram 私聊通知没发出去")
 
 
 def _log(msg: str) -> None:
@@ -213,7 +230,7 @@ def cmd_auto(args) -> None:
         save_json("positions.json", positions)
     except Exception as e:  # noqa: BLE001
         _log(f"同步失败 {type(e).__name__}: {e}")
-        _notify("老虎复盘失败", f"同步老虎订单失败：{type(e).__name__}: {e}")
+        _notify("今天的复盘没跑成", f"拉老虎订单时出错（{type(e).__name__}），复盘先停下，等我处理。")
         raise SystemExit(1)
     if f.token_refreshed:
         _log("token 已自动续期")
@@ -261,8 +278,10 @@ def cmd_auto(args) -> None:
                   "last_review_date": covered.isoformat()})
     save_json("auto_state.json", state)
     _refresh_cheatsheet()
-    _log(f"完成 {text} {day_path}")
-    _notify("期权复盘已生成", text + " 报告：tiger-review/reports/最新-今日复盘.html")
+    from .fupan_sync import push as fupan_push
+    up = fupan_push(f"复盘 {'、'.join(f'{d:%m-%d}' for d in days)}")
+    _log(f"完成 {text} {day_path}；{up}")
+    _notify("今天的复盘好了", text + "\n报告在附件里，打开就能看。", attach=day_path)
 
 
 def cmd_spike(args) -> None:
@@ -304,6 +323,12 @@ def cmd_alerts(args) -> None:
     alerts(args)
 
 
+def cmd_fupan(args) -> None:
+    """私有复盘仓库：默认上传报告和状态；--pull 换机器时取回。"""
+    from .fupan_sync import pull, push
+    print(pull() if args.pull else push(args.message or "手动同步复盘"))
+
+
 def main() -> None:
     ap = argparse.ArgumentParser(prog="tiger_review")
     sub = ap.add_subparsers(dest="cmd", required=True)
@@ -314,6 +339,7 @@ def main() -> None:
     sk = sub.add_parser("spike"); sk.add_argument("symbols", nargs="+"); sk.add_argument("--at"); sk.add_argument("--date")
     sk.add_argument("--put", action="store_true", help="读向上冲高（买 Put 的场景）")
     nt = sub.add_parser("note"); nt.add_argument("key"); nt.add_argument("--premise"); nt.add_argument("--logic")
+    fp = sub.add_parser("fupan"); fp.add_argument("--pull", action="store_true"); fp.add_argument("--message")
     au = sub.add_parser("auto")
     au.add_argument("--scheduled", action="store_true",
                     help="收盘定时任务用：当天已手动复盘过就直接跳过")
@@ -325,4 +351,5 @@ def main() -> None:
     dm = sub.add_parser("demo"); dm.add_argument("--start", default="2026-06-15"); dm.add_argument("--end", default="2026-09-25")
     args = ap.parse_args()
     {"doctor": cmd_doctor, "sync": cmd_sync, "review": cmd_review, "day": cmd_day, "demo": cmd_demo,
-     "auto": cmd_auto, "spike": cmd_spike, "note": cmd_note, "alerts": cmd_alerts}[args.cmd](args)
+     "auto": cmd_auto, "spike": cmd_spike, "note": cmd_note, "alerts": cmd_alerts,
+     "fupan": cmd_fupan}[args.cmd](args)
