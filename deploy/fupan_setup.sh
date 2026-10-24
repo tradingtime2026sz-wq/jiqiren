@@ -3,6 +3,7 @@
 # 由 deploy/install_macstudio.sh 末尾调用，也可单独运行：bash deploy/fupan_setup.sh
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+cd "$ROOT"   # tiger_review 包只在工作树里，`python -m tiger_review` 必须从仓库根目录跑
 PRIV="${JIQIREN_FUPAN_DIR:-$HOME/Codes/jiqiren-fupan}"
 
 # 1. 提交前检查：jiqiren 是公开仓库，拦个人数据、报告、账户号、密钥
