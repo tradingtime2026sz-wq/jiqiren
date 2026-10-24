@@ -6,8 +6,11 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 PRIV="${JIQIREN_FUPAN_DIR:-$HOME/Codes/jiqiren-fupan}"
 
 # 1. 提交前检查：jiqiren 是公开仓库，拦个人数据、报告、账户号、密钥
-install -m 755 "$ROOT/deploy/git-hooks/pre-commit" "$ROOT/.git/hooks/pre-commit"
-echo "提交前检查：已装"
+#    hooks 目录用 git 问（作为子模块检出时 .git 是文件，hooks 在上级仓库的 .git/modules/ 下）
+HOOKS="$(git -C "$ROOT" rev-parse --git-path hooks)"
+mkdir -p "$HOOKS"
+install -m 755 "$ROOT/deploy/git-hooks/pre-commit" "$HOOKS/pre-commit"
+echo "提交前检查：已装（$HOOKS）"
 
 # 2. 私有复盘仓库（复盘含个人盈亏，只放私有仓库 jiqiren-fupan）
 if ! gh auth status >/dev/null 2>&1; then
@@ -15,7 +18,7 @@ if ! gh auth status >/dev/null 2>&1; then
   exit 1
 fi
 gh auth setup-git >/dev/null 2>&1 || true
-if [ -d "$PRIV/.git" ]; then
+if [ -e "$PRIV/.git" ]; then   # -e 而非 -d：子模块的 .git 是文件
   git -C "$PRIV" pull -q --rebase origin main
 else
   gh repo clone tradingtime2026sz-wq/jiqiren-fupan "$PRIV" -- -q

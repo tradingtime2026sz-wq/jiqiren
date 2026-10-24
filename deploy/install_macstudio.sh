@@ -12,8 +12,13 @@ echo "仓库路径：$ROOT"
 if [ ! -x "$ROOT/.venv/bin/python" ]; then
   if command -v uv >/dev/null 2>&1; then uv venv --python 3.12 "$ROOT/.venv"; else python3 -m venv "$ROOT/.venv"; fi
 fi
-"$ROOT/.venv/bin/python" -m pip install -q --upgrade pip
-"$ROOT/.venv/bin/python" -m pip install -q -r "$ROOT/requirements.txt"
+# uv 建的 .venv 不带 pip，所以有 uv 就用 uv pip 装；没有 uv 才走 python -m pip
+if command -v uv >/dev/null 2>&1; then
+  uv pip install -q --python "$ROOT/.venv/bin/python" -r "$ROOT/requirements.txt"
+else
+  "$ROOT/.venv/bin/python" -m pip install -q --upgrade pip
+  "$ROOT/.venv/bin/python" -m pip install -q -r "$ROOT/requirements.txt"
+fi
 mkdir -p "$ROOT/data/logs" "$ROOT/data/raw" "$ROOT/reports"
 
 # 2. 定时任务：把模板里的旧路径换成本机路径，装进 ~/Library/LaunchAgents
