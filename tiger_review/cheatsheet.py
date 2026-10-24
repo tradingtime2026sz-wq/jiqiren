@@ -6,14 +6,16 @@ from __future__ import annotations
 
 import csv
 import json
+import os
 from datetime import date, datetime, timedelta
 from pathlib import Path
 
-from .config import DATA_DIR, ET, REPORTS_DIR
+from .config import DATA_DIR, ET, PROJECT_ROOT, REPORTS_DIR
 from .market import Prices
 from .report import CSS, esc
 
-POOL = Path("/Users/vock/Codes/option-ab-lab/pool.csv")
+# 票池默认取与本仓库同级的 option-ab-lab（笔记本 ~/Codes、Studio ~/Desktop/Codes 都成立），可用环境变量覆盖
+POOL = Path(os.environ.get("OPTION_AB_LAB_POOL", PROJECT_ROOT.parent / "option-ab-lab" / "pool.csv"))
 SKIP = {"QQQ", "SPY", "SOXX"}
 
 

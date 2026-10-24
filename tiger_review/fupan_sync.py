@@ -13,9 +13,10 @@ import shutil
 import subprocess
 from pathlib import Path
 
-from .config import DATA_DIR, REPORTS_DIR
+from .config import DATA_DIR, PROJECT_ROOT, REPORTS_DIR
 
-PRIV = Path(os.environ.get("JIQIREN_FUPAN_DIR", Path.home() / "Codes" / "jiqiren-fupan"))
+# 私有复盘仓库默认与本仓库同级（笔记本 ~/Codes、Studio ~/Desktop/Codes 都成立），可用环境变量覆盖
+PRIV = Path(os.environ.get("JIQIREN_FUPAN_DIR", PROJECT_ROOT.parent / "jiqiren-fupan"))
 STATE_FILES = ("notes.json", "raw/auto_state.json", "settings.json")
 
 
