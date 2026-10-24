@@ -238,7 +238,7 @@ def test_telegram_failure_never_prints_credential_and_uses_form(tmp_path, monkey
     config = tmp_path / ".config" / "telegram"
     config.mkdir(parents=True)
     (config / "bot_token").write_text("synthetic-private-value")
-    (config / "chat_id").write_text("123")
+    (config / "chat_id").write_text("123\n-456\n")   # 私聊 + 群：只应发群
     logs = []
     monkeypatch.setattr(a, "log", logs.append)
     forms = []
@@ -249,7 +249,7 @@ def test_telegram_failure_never_prints_credential_and_uses_form(tmp_path, monkey
 
     monkeypatch.setattr(a.request, "urlopen", reject)
     assert not a.Telegram(False).send(at("10:00"), "测试提醒")
-    assert forms == [{"chat_id": ["123"], "text": ["测试提醒"]}]
+    assert forms == [{"chat_id": ["-456"], "text": ["测试提醒"]}]
     assert "synthetic-private-value" not in capsys.readouterr().out + "".join(logs)
     (config / "chat_id").unlink()
     forms.clear()

@@ -265,9 +265,13 @@ class Telegram:
         if not dry:
             try:
                 self._key = (Path.home() / ".config/telegram/bot_token").read_text().strip()
-                # 一行一个目的地：私聊 chat_id 或频道 @用户名；每条提醒发给全部目的地
-                self._destinations = [x.strip() for x in (Path.home() / ".config/telegram/chat_id").read_text().splitlines()
-                                      if x.strip() and not x.strip().startswith("#")]
+                # 一行一个目的地：正数 = 私聊，负数或 @ 开头 = 群/频道。
+                # WQ 2026-10-24 定：盘中提醒只发群，不发私聊——所以只取群/频道那几行。
+                rows = [x.strip() for x in (Path.home() / ".config/telegram/chat_id").read_text().splitlines()
+                        if x.strip() and not x.strip().startswith("#")]
+                self._destinations = [x for x in rows if x.startswith(("-", "@"))]
+                if rows and not self._destinations:
+                    log("chat_id 里没有群/频道，盘中提醒不会发出（按 WQ 要求不发私聊）")
             except OSError:
                 log("Telegram 配置文件缺失或不可读，只记录提醒")
 
