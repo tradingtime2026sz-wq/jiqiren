@@ -11,8 +11,11 @@ from urllib import request, parse
 CFG = Path.home() / ".config/telegram"
 
 
-def destinations(only_first: bool) -> list[str]:
+def destinations(only_first: bool = False, groups_only: bool = False) -> list[str]:
+    """chat_id 文件一行一个目的地：正数 = 私聊，负数或 @ 开头 = 群/频道。"""
     rows = [x.strip() for x in (CFG / "chat_id").read_text().splitlines() if x.strip() and not x.strip().startswith("#")]
+    if groups_only:
+        return [r for r in rows if r.startswith(("-", "@"))]
     return rows[:1] if only_first else rows
 
 
@@ -47,11 +50,12 @@ def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--text"); ap.add_argument("--text-file"); ap.add_argument("--file", action="append", default=[])
     ap.add_argument("--caption", default=""); ap.add_argument("--only-first", action="store_true")
+    ap.add_argument("--groups-only", action="store_true", help="只发群/频道，不发私聊")
     a = ap.parse_args()
     token = (CFG / "bot_token").read_text().strip()
     text = Path(a.text_file).read_text(encoding="utf-8") if a.text_file else a.text
     ok_all = True
-    for chat in destinations(a.only_first):
+    for chat in destinations(a.only_first, a.groups_only):
         tag = f"{chat[:4]}…"
         if text:
             for i in range(0, len(text), 3900):          # Telegram 单条上限 4096
