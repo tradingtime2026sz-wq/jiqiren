@@ -330,10 +330,10 @@ def cmd_fupan(args) -> None:
 
 
 def cmd_leaders(args) -> None:
-    """时代领袖发言监听：跑一轮，有新的就推 Telegram 群（launchd 每 5 分钟调一次）。"""
+    """时代领袖发言采集：跑一轮，新原话记到当天 leaders_raw.jsonl（launchd 每 5 分钟调一次；默认不推群）。"""
     from .leaders import run_once
-    n = run_once(dry=args.dry_run, window_min=args.window)
-    print(f"{'将推' if args.dry_run else '已推'} {n} 条")
+    n = run_once(dry=args.dry_run, window_min=args.window, use_judge=args.judge, push=args.push)
+    print(f"{'将记' if args.dry_run else '已记'} {n} 条")
 
 
 def main() -> None:
@@ -356,9 +356,11 @@ def main() -> None:
     al.add_argument("--dry-run", action="store_true", help="只打印，不发 Telegram、不写去重状态")
     al.add_argument("--once", action="store_true", help="实盘只读取一轮，忽略常驻时段限制")
     dm = sub.add_parser("demo"); dm.add_argument("--start", default="2026-06-15"); dm.add_argument("--end", default="2026-09-25")
-    ld = sub.add_parser("leaders", help="时代领袖发言监听：抓一轮 Google News，新的推 Telegram 群")
-    ld.add_argument("--dry-run", action="store_true", help="只打印，不发、不记去重")
+    ld = sub.add_parser("leaders", help="时代领袖发言采集：抓一轮 Google News，新原话记到当天 leaders_raw.jsonl")
+    ld.add_argument("--dry-run", action="store_true", help="只打印，不记文件、不记去重")
     ld.add_argument("--window", type=int, default=90, help="只看最近多少分钟（默认 90）")
+    ld.add_argument("--judge", action="store_true", help="每条交三人裁判定性（写进 verdict 字段；默认关，盘前任务批量判）")
+    ld.add_argument("--push", action="store_true", help="裁判认定新事实的单条实时推群（默认关，WQ 10-25 定只进作战卡）")
     args = ap.parse_args()
     {"doctor": cmd_doctor, "sync": cmd_sync, "review": cmd_review, "day": cmd_day, "demo": cmd_demo,
      "auto": cmd_auto, "spike": cmd_spike, "note": cmd_note, "alerts": cmd_alerts,

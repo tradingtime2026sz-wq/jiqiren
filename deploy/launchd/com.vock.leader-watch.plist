@@ -3,7 +3,8 @@
 <plist version="1.0">
 <dict>
   <key>Label</key><string>com.vock.leader-watch</string>
-  <!-- 时代领袖发言监听：每 5 分钟抓一轮 Google News，新的推 Telegram 群。全天候（这些人不分盘前盘后说话）。 -->
+  <!-- 时代领袖发言采集：每 5 分钟抓一轮 Google News，新原话记到 ~/Codes/reports/盘前作战卡/<D>/leaders_raw.jsonl，
+       不推群（WQ 10-25：盘前由裁判浓缩进作战卡）。全天候，这些人不分盘前盘后说话。 -->
   <key>ProgramArguments</key>
   <array>
     <string>/Users/vock/Codes/tiger-review/.venv/bin/python</string>

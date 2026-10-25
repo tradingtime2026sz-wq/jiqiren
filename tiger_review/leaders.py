@@ -1,13 +1,14 @@
-"""时代领袖发言监听（WQ 2026-10-24 定：川普、黄仁勋、马斯克这类人的原话是「边际高置信」信息，要第一时间推到群里）。
+"""时代领袖发言采集（WQ 2026-10-25 定：不要实时推群刷屏，盘前浓缩进作战卡）。
 
-数据源：Google News RSS（免费、不用密钥、延迟分钟级），每个人一条查询，只看最近 WINDOW_MIN 分钟。
+这一侧只「收」不「推」：每 5 分钟拉 Google News RSS，把川普、黄仁勋、马斯克本人涉市场的原话追加到
+`~/Codes/reports/盘前作战卡/<采集日 ET>/leaders_raw.jsonl`（一行一条：ts_et、who、quote、source、source_url、hits，
+可选 verdict）。盘前裁判任务读上一收盘以来的这些行，浓缩成 ≤3 行写 `leaders_brief.json`，作战卡在天气门下面显示一行。
+
 初筛：标题里本人名字紧挨着「说 / 宣布 / 威胁…」这类动词（是他在说，不是别人在说他），且带市场相关词；
-去重：同一个人 6 小时内标题用词重合度高的算同一件事；每人每小时最多推 MAX_PER_HOUR 条，防刷屏。
-裁判（WQ 10-25 定：不能一说话就推）：初筛过的再交给三个人投票——宏观交易员 / AI 硬件板块研究员 / 期权日内交易员，
-用本机 `claude -p`（Haiku，不开工具），只有「新事实」且至少两票 push 才发；裁判出错按不发处理，都记在 data/logs/leaders.log。
-推送：Telegram 群（tg_send.py --groups-only 读 chat_id 第 2 行起的群）；去重状态在 data/leaders_seen.json。
-用法：python -m tiger_review leaders [--dry-run] [--window 90]      # launchd 每 5 分钟跑一次，跑完就退
-名单和关键词改本文件顶部的 LEADERS / MARKET 即可。
+去重：同一个人 6 小时内标题用词重合度高的算同一件事，只记一次。
+裁判（可选 --judge）：初筛过的再交三人投票（宏观 / 板块 / 期权）定性是不是新事实，结果写进 verdict 字段；默认不开，盘前任务批量判更省。
+推送（可选 --push，默认关）：保留给以后想单条实时推群时用。
+用法：python -m tiger_review leaders [--dry-run] [--window 90] [--judge] [--push]
 """
 from __future__ import annotations
 
@@ -26,6 +27,9 @@ from urllib import parse, request
 
 from .config import DATA_DIR, ET
 
+CARDS = Path.home() / "Codes" / "reports" / "盘前作战卡"   # 和 card_push / 盘前任务共用的产物目录
+RAW_NAME = "leaders_raw.jsonl"
+
 # 盯谁：显示名 → Google News 查询 + 标题里认人的别名（按长到短排）
 LEADERS: dict[str, dict] = {
     "川普": {"q": '"Trump"', "aliases": ["President Trump", "Donald Trump", "Trump", "POTUS"]},
@@ -37,7 +41,7 @@ VERBS = (r"(?:says?|said|tells?|told|warns?|vows?|calls?|announce[sd]?|threatens
          r"|wrote|writes|tweets?|unveils?|orders?|pledges?|hints?|predicts?|urges?|confirms?|denies|rules? out|promises?"
          r"|backs?|blasts?|praises?|demands?|rejects?|touts?|floats?|insists?|claims?|reveals?|suggests?|proposes?"
          r"|wants?|seeks?|pushes|pushed|moves? to|set to|to [a-z]+)")
-# 市场相关：命中的词会写进推送的「相关」行
+# 市场相关：命中的词写进 hits
 MARKET = re.compile(
     r"\b(tariffs?|trade|China|Chinese|Fed|rates?|Powell|interest|inflation|Nvidia|NVDA|chips?|semiconductors?|exports?"
     r"|AI|Tesla|TSLA|SpaceX|xAI|Grok|tax(?:es)?|bill|oil|deal|ban|sanctions?|dollar|crypto|bitcoin|TSMC|Intel|Apple"
@@ -51,8 +55,10 @@ SEEN = DATA_DIR / "leaders_seen.json"
 TTL_H = 48          # 去重记忆保留多久
 DUP_H = 6           # 多久以内的相似标题算同一件事
 DUP_JACCARD = 0.3   # 标题用词重合度 ≥ 这个值算同一件事（已去掉人名和停用词）
-MAX_PER_HOUR = 3    # 每人每小时最多推几条
+MAX_PER_HOUR = 3    # --push 时每人每小时最多推几条
 WINDOW_MIN = 90
+STOP = {"the", "a", "an", "of", "to", "in", "on", "for", "and", "or", "as", "at", "by", "with", "after", "over",
+        "from", "is", "are", "be", "has", "have", "it", "its", "his", "her", "he", "she", "that", "this", "says", "said"}
 JUDGE_MODEL = os.environ.get("LEADERS_JUDGE_MODEL", "claude-haiku-5-5")
 JUDGE_TIMEOUT = 90
 JUDGE_PROMPT = """你是美股科技交易团队的「领袖发言裁判」。团队做纳指期权和 AI 硬件链（算力 / 存储 / 光互连 / 物理基建：NVDA、MU、SNDK、LITE、AAOI、MRVL、TSLA 等），也盯关税、中美、美联储、财政这些宏观开关。
@@ -66,55 +72,12 @@ JUDGE_PROMPT = """你是美股科技交易团队的「领袖发言裁判」。�
 只输出一行 JSON，不要别的字：{{"fact":true或false,"macro":true或false,"sector":true或false,"options":true或false,"why":"不超过40字的中文理由","tickers":["最相关的美股代码，最多3个"]}}
 不要调用任何工具。"""
 
-
-def _claude_bin() -> str | None:
-    """本机 claude 命令：环境变量 CLAUDE_BIN → PATH → 常见安装位置（launchd 的 PATH 很短，所以要自己找）。"""
-    if os.environ.get("CLAUDE_BIN"):
-        return os.environ["CLAUDE_BIN"]
-    found = shutil.which("claude")
-    if found:
-        return found
-    home = str(Path.home())
-    for pat in (f"{home}/.local/bin/claude", f"{home}/.nvm/versions/node/*/bin/claude", "/opt/homebrew/bin/claude"):
-        hits = sorted(glob.glob(pat))
-        if hits:
-            return hits[-1]
-    return None
-
-
-def judge(who: str, it: dict) -> dict:
-    """三人投票。返回 {"push": bool, "why": str, "tickers": [...], "votes": "宏观✓ 板块✗ 期权✓", "error": str|None}。
-    任何失败都按不推处理（宁可漏，不刷屏）。"""
-    bad = {"push": False, "why": "", "tickers": [], "votes": "", "error": None}
-    cb = _claude_bin()
-    if not cb:
-        return {**bad, "error": "没找到 claude 命令"}
-    prompt = JUDGE_PROMPT.format(who=who, title=strip_source(it["title"]), source=it["source"] or "未知",
-                                 at=f"{it['at'].astimezone(ET):%m-%d %H:%M}", hits="、".join(it["hits"]))
-    try:
-        r = subprocess.run([cb, "-p", "--model", JUDGE_MODEL, "--max-turns", "1", "--no-session-persistence",
-                            "--output-format", "text", prompt],
-                           capture_output=True, text=True, timeout=JUDGE_TIMEOUT, cwd=str(Path.home()),
-                           env={**os.environ, "CLAUDE_CODE_DISABLE_AUTO_MEMORY": "1"})
-    except (OSError, subprocess.TimeoutExpired) as e:
-        return {**bad, "error": f"claude 调用失败 {type(e).__name__}"}
-    m = re.search(r"\{.*\}", r.stdout, re.S)
-    if r.returncode != 0 or not m:
-        return {**bad, "error": f"claude 返回异常 rc={r.returncode}: {(r.stderr or r.stdout)[:120]!r}"}
-    try:
-        d = json.loads(m.group(0))
-    except ValueError:
-        return {**bad, "error": f"裁判输出不是 JSON: {m.group(0)[:120]!r}"}
-    fact = bool(d.get("fact"))
-    votes = [bool(d.get(k)) for k in ("macro", "sector", "options")]
-    mark = lambda v: "✓" if v else "✗"  # noqa: E731
-    # 推送条件：是新事实，且宏观或板块至少一人认为会改变预期。期权那一票只作参考（开盘 30 分钟有没有可交易波动），
-    # 不作门槛——板块级的新事实本身就是团队要的「边际高置信」。
-    return {"push": fact and (votes[0] or votes[1]), "why": str(d.get("why") or "")[:60],
-            "tickers": [str(t) for t in (d.get("tickers") or [])][:3],
-            "votes": f"新事实{mark(fact)} 宏观{mark(votes[0])} 板块{mark(votes[1])} 期权{mark(votes[2])}", "error": None}
-STOP = {"the", "a", "an", "of", "to", "in", "on", "for", "and", "or", "as", "at", "by", "with", "after", "over",
-        "from", "is", "are", "be", "has", "have", "it", "its", "his", "her", "he", "she", "that", "this", "says", "said"}
+ALIAS_WORDS = {w.lower() for cfg in LEADERS.values() for a in cfg["aliases"] for w in re.findall(r"[a-z]+", a.lower())}
+# 「…, says Trump」这种动词在名字前面的写法，只认紧挨着的纯说话动词，免得 "plan to dismantle Trump's agenda" 也算
+SAY_BEFORE = (r"(?:says?|said|tells?|told|warns?|vows?|insists?|claims?|predicts?|promises?|threatens?|announce[sd]?"
+              r"|writes|wrote|posts?|posted|according to)")
+# 名字后面跟这些词就不是他本人在说（"Trump administration"、"Trump's"、"Trump team"…）
+NOT_HIMSELF = r"(?!['’]s\b)(?!\s+(?:administration|admin|team|officials?|aides?|campaign|allies|era|org|family|supporters?)\b)"
 
 
 def _log(msg: str) -> None:
@@ -129,20 +92,10 @@ def strip_source(title: str) -> str:
     return re.sub(r"\s+-\s+[^-]+$", "", title).strip()
 
 
-ALIAS_WORDS = {w.lower() for cfg in LEADERS.values() for a in cfg["aliases"] for w in re.findall(r"[a-z]+", a.lower())}
-# 「…, says Trump」这种动词在名字前面的写法，只认紧挨着的纯说话动词，免得 "plan to dismantle Trump's agenda" 也算
-SAY_BEFORE = (r"(?:says?|said|tells?|told|warns?|vows?|insists?|claims?|predicts?|promises?|threatens?|announce[sd]?"
-              r"|writes|wrote|posts?|posted|according to)")
-
-
 def tokens(title: str) -> set[str]:
     """标题用词（去掉停用词和人名本身，人名几乎每条都有，留着会把不相干的事判成同一件）。"""
     words = re.findall(r"[a-z0-9]+", strip_source(title).lower())
     return {w for w in words if w not in STOP and w not in ALIAS_WORDS and len(w) > 2}
-
-
-# 名字后面跟这些词就不是他本人在说（"Trump administration"、"Trump's"、"Trump team"…）
-NOT_HIMSELF = r"(?!['’]s\b)(?!\s+(?:administration|admin|team|officials?|aides?|campaign|allies|era|org|family|supporters?)\b)"
 
 
 def speaks(title: str, aliases: list[str]) -> bool:
@@ -196,7 +149,7 @@ def pick(items: list[dict], aliases: list[str], window_min: int) -> list[dict]:
 
 
 def _load_seen() -> list[dict]:
-    """[{who, title, tokens, at}]，只留 TTL_H 小时内的。"""
+    """[{who, title, tokens, at, pushed}]，只留 TTL_H 小时内的。"""
     try:
         seen = json.loads(SEEN.read_text(encoding="utf-8"))
         if not isinstance(seen, list):
@@ -229,7 +182,72 @@ def is_dup(who: str, title: str, seen: list[dict]) -> bool:
 
 def pushed_last_hour(who: str, seen: list[dict]) -> int:
     cutoff = (datetime.now(timezone.utc) - timedelta(hours=1)).isoformat()
-    return sum(1 for s in seen if s.get("who") == who and s.get("at", "") >= cutoff and s.get("pushed", True))
+    return sum(1 for s in seen if s.get("who") == who and s.get("at", "") >= cutoff and s.get("pushed"))
+
+
+def _claude_bin() -> str | None:
+    """本机 claude 命令：环境变量 CLAUDE_BIN → PATH → 常见安装位置（launchd 的 PATH 很短，所以要自己找）。"""
+    if os.environ.get("CLAUDE_BIN"):
+        return os.environ["CLAUDE_BIN"]
+    found = shutil.which("claude")
+    if found:
+        return found
+    home = str(Path.home())
+    for pat in (f"{home}/.local/bin/claude", f"{home}/.nvm/versions/node/*/bin/claude", "/opt/homebrew/bin/claude"):
+        hits = sorted(glob.glob(pat))
+        if hits:
+            return hits[-1]
+    return None
+
+
+def judge(who: str, it: dict) -> dict:
+    """三人投票。返回 {"push": bool, "fact": bool, "why": str, "tickers": [...], "votes": "新事实✓ 宏观✓ …", "error": str|None}。
+    任何失败都按不推处理（宁可漏，不刷屏）。"""
+    bad = {"push": False, "fact": False, "why": "", "tickers": [], "votes": "", "error": None}
+    cb = _claude_bin()
+    if not cb:
+        return {**bad, "error": "没找到 claude 命令"}
+    prompt = JUDGE_PROMPT.format(who=who, title=strip_source(it["title"]), source=it["source"] or "未知",
+                                 at=f"{it['at'].astimezone(ET):%m-%d %H:%M}", hits="、".join(it["hits"]))
+    try:
+        r = subprocess.run([cb, "-p", "--model", JUDGE_MODEL, "--max-turns", "1", "--no-session-persistence",
+                            "--output-format", "text", prompt],
+                           capture_output=True, text=True, timeout=JUDGE_TIMEOUT, cwd=str(Path.home()),
+                           env={**os.environ, "CLAUDE_CODE_DISABLE_AUTO_MEMORY": "1"})
+    except (OSError, subprocess.TimeoutExpired) as e:
+        return {**bad, "error": f"claude 调用失败 {type(e).__name__}"}
+    m = re.search(r"\{.*\}", r.stdout, re.S)
+    if r.returncode != 0 or not m:
+        return {**bad, "error": f"claude 返回异常 rc={r.returncode}: {(r.stderr or r.stdout)[:120]!r}"}
+    try:
+        d = json.loads(m.group(0))
+    except ValueError:
+        return {**bad, "error": f"裁判输出不是 JSON: {m.group(0)[:120]!r}"}
+    fact = bool(d.get("fact"))
+    votes = [bool(d.get(k)) for k in ("macro", "sector", "options")]
+    mark = lambda v: "✓" if v else "✗"  # noqa: E731
+    # 推送条件：是新事实，且宏观或板块至少一人认为会改变预期。期权那一票只作参考。
+    return {"push": fact and (votes[0] or votes[1]), "fact": fact, "why": str(d.get("why") or "")[:60],
+            "tickers": [str(t) for t in (d.get("tickers") or [])][:3],
+            "votes": f"新事实{mark(fact)} 宏观{mark(votes[0])} 板块{mark(votes[1])} 期权{mark(votes[2])}", "error": None}
+
+
+def raw_path(at: datetime) -> Path:
+    """按采集时刻的美东日期落盘：~/Codes/reports/盘前作战卡/<D>/leaders_raw.jsonl。"""
+    return CARDS / f"{at.astimezone(ET):%Y-%m-%d}" / RAW_NAME
+
+
+def record(who: str, it: dict, verdict: dict | None) -> Path:
+    """追加一行到当天的 leaders_raw.jsonl。"""
+    p = raw_path(datetime.now(timezone.utc))
+    p.parent.mkdir(parents=True, exist_ok=True)
+    row = {"ts_et": it["at"].astimezone(ET).isoformat(timespec="minutes"), "who": who,
+           "quote": strip_source(it["title"]), "source": it["source"], "source_url": it["link"], "hits": it["hits"]}
+    if verdict is not None and not verdict.get("error"):
+        row["verdict"] = {k: verdict[k] for k in ("fact", "push", "why", "tickers", "votes")}
+    with open(p, "a", encoding="utf-8") as fh:
+        fh.write(json.dumps(row, ensure_ascii=False) + "\n")
+    return p
 
 
 def format_message(who: str, it: dict, verdict: dict | None = None) -> str:
@@ -252,10 +270,10 @@ def send_group(text: str) -> bool:
     return r.returncode == 0
 
 
-def run_once(dry: bool = False, window_min: int = WINDOW_MIN) -> int:
-    """跑一轮：抓 → 筛 → 去重 → 推。返回推出的条数。"""
+def run_once(dry: bool = False, window_min: int = WINDOW_MIN, use_judge: bool = False, push: bool = False) -> int:
+    """跑一轮：抓 → 初筛 → 去重 → 记到 leaders_raw.jsonl（可选裁判、可选推群）。返回记下的条数。"""
     seen = _load_seen()
-    pushed = 0
+    recorded = 0
     for who, cfg in LEADERS.items():
         try:
             items = pick(fetch(cfg["q"]), cfg["aliases"], window_min)
@@ -265,34 +283,27 @@ def run_once(dry: bool = False, window_min: int = WINDOW_MIN) -> int:
         for it in sorted(items, key=lambda x: x["at"]):
             if is_dup(who, it["title"], seen):
                 continue
-            if pushed_last_hour(who, seen) >= MAX_PER_HOUR:
-                _log(f"{who} 一小时已推 {MAX_PER_HOUR} 条，先压下：{it['title'][:80]}")
-                break
-            v = judge(who, it)
             title80 = strip_source(it["title"])[:80]
-            # 判过的（不管推不推）都记进 seen，同一件事不再反复送去裁判
+            v = judge(who, it) if use_judge else None
+            if v and v["error"]:
+                _log(f"{who} 裁判出错：{v['error']}｜{title80}")
             seen.append({"who": who, "title": strip_source(it["title"]), "tokens": sorted(tokens(it["title"])),
                          "at": datetime.now(timezone.utc).isoformat(), "pushed": False})
-            if v["error"]:
-                _log(f"{who} 裁判出错，不推：{v['error']}｜{title80}")
-                if dry:
-                    print(f"[裁判出错] {title80}：{v['error']}\n", flush=True)
-                continue
-            if not v["push"]:
-                _log(f"{who} 裁判否决（{v['votes']}）{v['why']}｜{title80}")
-                if dry:
-                    print(f"[否决 {v['votes']}] {title80}｜{v['why']}\n", flush=True)
-                continue
-            msg = format_message(who, it, v)
             if dry:
-                print(msg, "\n", flush=True)
-                ok = True
+                print(f"[记录{'' if not v else ' ' + v['votes']}] {who}｜{title80}" + (f"｜{v['why']}" if v and v["why"] else ""),
+                      flush=True)
             else:
-                ok = send_group(msg)
-                _log(f"{who} {'已推' if ok else '推送失败'}（{v['votes']}）{v['why']}｜{title80}")
-            if ok:
-                seen[-1]["pushed"] = True
-                pushed += 1
+                record(who, it, v)
+                _log(f"{who} 已记{'（' + v['votes'] + '）' if v and not v['error'] else ''}｜{title80}")
+            recorded += 1
+            if push and v and v["push"] and pushed_last_hour(who, seen) < MAX_PER_HOUR:
+                msg = format_message(who, it, v)
+                ok = True if dry else send_group(msg)
+                if dry:
+                    print(msg, "\n", flush=True)
+                if ok:
+                    seen[-1]["pushed"] = True
+                    _log(f"{who} 已推群｜{title80}")
     if not dry:
         _save_seen(seen)
-    return pushed
+    return recorded
