@@ -96,6 +96,13 @@ class _Text(HTMLParser):
 
 def intraday_text(html: str, day: str) -> str:
     """日内卡 HTML → 可见文字（卡本身已经收敛成三行头 + 每只四行，直接用）。"""
+    m = re.search(r"<!--review-start-->(.*?)<!--review-end-->", html, re.S)
+    if m:   # 审稿过的卡（river 11-04，info-heat-card references/output-review.md）：群里只发「先看这几行」，完整卡在 PDF
+        p = _Text()
+        p.feed(m.group(1))
+        lines = [x.strip() for x in re.sub(r"[ \t]+", " ", "".join(p.out)).splitlines() if x.strip()]
+        lines = [x for x in lines if not x.startswith("下面是完整日内卡")]
+        return "\n".join([f"日内卡 {day}"] + lines + ["", "完整卡见附件 PDF。"])
     p = _Text()
     p.feed(html)
     t = re.sub(r"[ \t]+", " ", "".join(p.out))
