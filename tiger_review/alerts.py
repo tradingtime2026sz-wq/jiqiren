@@ -350,8 +350,13 @@ class Engine:
                  f"1. 恐慌买 Put，标的 {'、'.join(c.underlyings)}。" + ("盘前 VIX 已经高过三个月 VIX，今天不做。" if enabled is False else
                  "怎么做：盘中 VIX 比昨天涨 5% 到 9%、QQQ 又跌到昨收下方，我再提醒；提醒了就小仓位买当天到期、略虚值的 Put，拿到收盘。")]
         if c.pins:
-            parts, skipped = [], []
+            parts, skipped, levels = [], [], []
             for p_ in c.pins:
+                ent = p_.get("entry") or {}
+                if ent.get("mode") == "level":
+                    hold = number(ent.get("hold_level")) or number(p_.get("prev_close"))
+                    levels.append(f"{p_['sym']}（守住 {hold:.2f}）" if hold else p_["sym"])
+                    continue
                 dp = number(p_.get("pin_depth_pct"))
                 if dp and p_.get("prev_close"):
                     parts.append(f"{p_['sym']} 约 {dp:.1%}、${dp * float(p_['prev_close']):.1f}")
@@ -362,8 +367,13 @@ class Engine:
             if parts:
                 lines.append(f"2. 接针买 Call：{'、'.join(x.split(' ')[0] for x in parts)}。怎么做：从今天最高点跌下来超过它平时一天的波动（{'；'.join(parts)}）"
                              "我提醒「插针了」；等一分钟线重新站上 20 分钟均线我再提醒「可以接」；针底跌破就走。")
+            if levels:
+                lines.append(f"{'3' if parts else '2'}. 按剧本接 Call：{'、'.join(levels)}。怎么做：价格回到今天均价线附近、守住那个价位，我提醒「准备接」；"
+                             "等一分钟线收盘重新站上 20 分钟均线我再提醒「可以接」；跌破那个价位当天不接。今天的剧本是浅回落，不等深针。")
             if skipped:
                 lines.append(f"{'、'.join(skipped)} 的平时波动算不出来，今天不盯。")
+            if not parts and not levels and not skipped:
+                lines.append("2. 接针买 Call：今天没有进攻票。")
         else:
             lines.append("2. 接针买 Call：今天没有进攻票。")
         why = "为什么：" + stage
@@ -494,6 +504,8 @@ class Engine:
         if state.get("last_bar", "") >= bar["time_key"]:
             return
         state["last_bar"] = bar["time_key"]
+        if (spec.get("entry") or {}).get("mode") == "level":
+            return self.pin_level(at, spec, bars, state)
         peak_i = max(range(len(bars)), key=lambda i: float(bars[i]["high"]))
         peak = float(bars[peak_i]["high"])
         identity = f"{bars[peak_i]['time_key']}:{peak}"
@@ -559,6 +571,65 @@ class Engine:
                 lines.append(outside)
             self.emit(prefix + ":confirmed", at, lines)
 
+
+    def pin_level(self, at: datetime, spec: dict, bars: list[dict], state: dict) -> None:
+        """按剧本进（WQ 2026-11-09）：守住位 + 回到今天均价线附近 + 一分钟收盘重新站上 20 分钟均线。
+        三条提醒各一天一次：破位不接 / 到位准备接 / 可以接。和日内卡、决策面板用同一份 entry。"""
+        sym, entry = spec["sym"], spec.get("entry") or {}
+        hold = number(entry.get("hold_level")) or number(spec.get("prev_close"))
+        bar = bars[-1]
+        close, low = float(bar["close"]), float(bar["low"])
+        vol = sum(float(b.get("volume") or 0) for b in bars)
+        tov = sum(float(b.get("turnover") or 0) for b in bars)
+        vwap = (tov / vol) if vol > 0 and tov > 0 else (
+            sum((float(b["high"]) + float(b["low"]) + float(b["close"])) / 3 * float(b.get("volume") or 1) for b in bars)
+            / max(1.0, sum(float(b.get("volume") or 1) for b in bars)))
+        bar_at = datetime.fromisoformat(bar["time_key"]).replace(tzinfo=ET)
+        outside = (f"现在已过 {self.card.main_window[1]} 的主要时段，只当提示。"
+                   if not self.card.main_window[0] <= bar_at.strftime("%H:%M") <= self.card.main_window[1] else "")
+        prefix = f"lvl:{sym}"
+        if hold and close < hold:
+            if prefix + ":broke" not in self.state["sent"]:
+                lines = [f"{sym} 跌破 {hold:.2f} 了：今天不接",
+                         "怎么做：不买；已经拿着的按止损走。",
+                         f"为什么：盘前写的进法是守住 {hold:.2f} 再接，这一分钟收在 {close:.2f}，守不住就是剧本破了。"]
+                if spec.get("no_catch_if"):
+                    lines.append(f"盘前写的不接情况：{spec['no_catch_if']}")
+                self.emit(prefix + ":broke", at, lines)
+            state["armed_at"] = None
+            return
+        if prefix + ":broke" in self.state["sent"]:
+            return   # 破过位，当天不再喊接
+        if state.get("armed_at") is None and low <= vwap * 1.0015 and (not hold or close >= hold):
+            state["armed_at"], state["pull_low"] = bar["time_key"], low
+            lines = [f"{sym} 回到均价线附近了：准备接（买 Call）",
+                     f"怎么做：先别进。等一分钟线收盘重新站上 20 分钟均线我再提醒「可以接」；跌破 {hold:.2f} 就不做。" if hold else
+                     "怎么做：先别进。等一分钟线收盘重新站上 20 分钟均线我再提醒「可以接」。",
+                     f"为什么：价格回到今天均价 {vwap:.2f} 附近" + (f"、还守着 {hold:.2f}" if hold else "") + "，这是盘前写的进法：剧本里回落本来就该浅，不等深针。"]
+            if entry.get("text"):
+                lines.append(f"盘前原话：{entry['text']}")
+            if outside:
+                lines.append(outside)
+            self.emit(prefix + ":arrived", at, lines)
+            return
+        if state.get("armed_at") is None:
+            return
+        state["pull_low"] = min(float(state.get("pull_low") or low), low)
+        period = int(self.card.rules["ma"])
+        if bar["time_key"] <= state["armed_at"] or len(bars) < period + 1:
+            return
+        ma = sum(float(b["close"]) for b in bars[-period:]) / period
+        before = sum(float(b["close"]) for b in bars[-period - 1:-1]) / period
+        if float(bars[-2]["close"]) <= before and close > ma and close >= vwap and prefix + ":confirmed" not in self.state["sent"]:
+            stop = float(state["pull_low"])
+            lines = [f"{sym} 可以接了：站回 20 分钟均线和今天均价了",
+                     f"怎么做：买当天到期、略虚值的 Call，进场价约 {close:.2f}；回踩低点 {stop:.2f} 跌破就走，{self.card.flat_by} 前全部了结。",
+                     f"为什么：这一分钟收在 {close:.2f}，重新站上 20 分钟均线 {ma:.2f} 和今天均价 {vwap:.2f}" + (f"，{hold:.2f} 一直守着。" if hold else "。")]
+            if spec.get("no_catch_if"):
+                lines.append(f"盘前写的不接情况：{spec['no_catch_if']}")
+            if outside:
+                lines.append(outside)
+            self.emit(prefix + ":confirmed", at, lines)
 
 
 def rth(rows: list[dict], day: date, before: str | None = None) -> list[dict]:
