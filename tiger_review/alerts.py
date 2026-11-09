@@ -366,10 +366,10 @@ class Engine:
                     skipped.append(p_["sym"])
             if parts:
                 lines.append(f"2. 接针买 Call：{'、'.join(x.split(' ')[0] for x in parts)}。怎么做：从今天最高点跌下来超过它平时一天的波动（{'；'.join(parts)}）"
-                             "我提醒「插针了」；等一分钟线重新站上 MA20 我再提醒「可以接」；针底跌破就走。")
+                             "我提醒「插针了」；等 1 分钟 K 线收盘重新站上 1 分钟 MA20 我再提醒「可以接」；针底跌破就走。")
             if levels:
                 lines.append(f"{'3' if parts else '2'}. 按剧本接 Call：{'、'.join(levels)}。怎么做：价格回到 VWAP 附近、守住那个价位，我提醒「准备接」；"
-                             "等一分钟线收盘重新站上 MA20 我再提醒「可以接」；跌破那个价位当天不接。今天的剧本是浅回落，不等深针。")
+                             "等 1 分钟 K 线收盘重新站上 1 分钟 MA20 我再提醒「可以接」；跌破那个价位当天不接。今天的剧本是浅回落，不等深针。")
             if skipped:
                 lines.append(f"{'、'.join(skipped)} 的平时波动算不出来，今天不盯。")
             if not parts and not levels and not skipped:
@@ -547,7 +547,7 @@ class Engine:
             hist = ("历史：这种针（跌得够深、条件全齐），30 分钟内先弹 2% 的十次里约七次。" if score >= spec["best_score"]
                     else "历史：这种针等站回均线再接，十次里约五次先涨 2%，约两次先跌破针底，仓位放小。")
             lines = [f"{sym} 插针了：准备接（买 Call）",
-                     f"怎么做：先别进。等一分钟线收盘重新站上 MA20 我再提醒「可以接」；进了之后针底 {low:.2f} 跌破就走。",
+                     f"怎么做：先别进。等 1 分钟 K 线收盘重新站上 1 分钟 MA20 我再提醒「可以接」；进了之后针底 {low:.2f} 跌破就走。",
                      f"为什么：从今天最高点 {peak:.2f} 跌到 {close:.2f}，跌了 {depth:.1%}，超过它平时一天的波动（{threshold:.1%}）"
                      + (f"，而且{reasons}。" if reasons else "。"), hist]
             if spec.get("no_catch_if"):
@@ -562,9 +562,9 @@ class Engine:
         ma = sum(float(b["close"]) for b in bars[-period:]) / period
         before = sum(float(b["close"]) for b in bars[-period - 1:-1]) / period
         if float(bars[-2]["close"]) <= before and close > ma:
-            lines = [f"{sym} 可以接了：站回 MA20 了",
+            lines = [f"{sym} 可以接了：1 分钟收盘站回 1 分钟 MA20 了",
                      f"怎么做：买当天到期、略虚值的 Call，进场价约 {close:.2f}；针底 {low:.2f} 跌破就走，{self.card.flat_by} 前全部了结。",
-                     f"为什么：这一分钟收在 {close:.2f}，重新站上了 MA20 {ma:.2f}。"]
+                     f"为什么：这一分钟收在 {close:.2f}，重新站上了 1 分钟 MA20 {ma:.2f}。"]
             if spec.get("no_catch_if"):
                 lines.append(f"盘前写的不接情况：{spec['no_catch_if']}")
             if outside:
@@ -573,7 +573,7 @@ class Engine:
 
 
     def pin_level(self, at: datetime, spec: dict, bars: list[dict], state: dict) -> None:
-        """按剧本进（WQ 2026-11-09）：守住位 + 回到 VWAP 附近 + 一分钟收盘重新站上 MA20。
+        """按剧本进（WQ 2026-11-09）：守住位 + 回到 VWAP 附近 + 1 分钟收盘重新站上 1 分钟 MA20。
         三条提醒各一天一次：破位不接 / 到位准备接 / 可以接。和日内卡、决策面板用同一份 entry。"""
         sym, entry = spec["sym"], spec.get("entry") or {}
         hold = number(entry.get("hold_level")) or number(spec.get("prev_close"))
@@ -603,8 +603,8 @@ class Engine:
         if state.get("armed_at") is None and low <= vwap * 1.0015 and (not hold or close >= hold):
             state["armed_at"], state["pull_low"] = bar["time_key"], low
             lines = [f"{sym} 回到 VWAP 附近了：准备接（买 Call）",
-                     f"怎么做：先别进。等一分钟线收盘重新站上 MA20 我再提醒「可以接」；跌破 {hold:.2f} 就不做。" if hold else
-                     "怎么做：先别进。等一分钟线收盘重新站上 MA20 我再提醒「可以接」。",
+                     f"怎么做：先别进。等 1 分钟 K 线收盘重新站上 1 分钟 MA20 我再提醒「可以接」；跌破 {hold:.2f} 就不做。" if hold else
+                     "怎么做：先别进。等 1 分钟 K 线收盘重新站上 1 分钟 MA20 我再提醒「可以接」。",
                      f"为什么：价格回到 VWAP {vwap:.2f} 附近" + (f"、还守着 {hold:.2f}" if hold else "") + "，这是盘前写的进法：剧本里回落本来就该浅，不等深针。"]
             if entry.get("text"):
                 lines.append(f"盘前原话：{entry['text']}")
@@ -622,9 +622,9 @@ class Engine:
         before = sum(float(b["close"]) for b in bars[-period - 1:-1]) / period
         if float(bars[-2]["close"]) <= before and close > ma and close >= vwap and prefix + ":confirmed" not in self.state["sent"]:
             stop = float(state["pull_low"])
-            lines = [f"{sym} 可以接了：站回 MA20 和 VWAP 了",
+            lines = [f"{sym} 可以接了：1 分钟收盘站回 1 分钟 MA20 和 VWAP 了",
                      f"怎么做：买当天到期、略虚值的 Call，进场价约 {close:.2f}；回踩低点 {stop:.2f} 跌破就走，{self.card.flat_by} 前全部了结。",
-                     f"为什么：这一分钟收在 {close:.2f}，重新站上 MA20 {ma:.2f} 和 VWAP {vwap:.2f}" + (f"，{hold:.2f} 一直守着。" if hold else "。")]
+                     f"为什么：这一分钟收在 {close:.2f}，重新站上 1 分钟 MA20 {ma:.2f} 和 VWAP {vwap:.2f}" + (f"，{hold:.2f} 一直守着。" if hold else "。")]
             if spec.get("no_catch_if"):
                 lines.append(f"盘前写的不接情况：{spec['no_catch_if']}")
             if outside:
