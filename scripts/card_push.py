@@ -33,6 +33,16 @@ def pct(x, nd=1) -> str:
     return f"{x:+.{nd}%}" if isinstance(x, (int, float)) else "待查"
 
 
+def _cut(s, n: int) -> str:
+    s = re.sub(r"\s+", " ", str(s or "")).strip()
+    return s if len(s) <= n else s[:n - 1] + "…"
+
+
+def _news(r: dict) -> str:
+    """一行的消息：作战卡已接上的事实（new_fact / headline），没有就用它的描述。"""
+    return (r.get("new_fact") or r.get("headline") or r.get("what") or "").strip()
+
+
 def multi_text(d: dict, day: str) -> str:
     """多日作战卡 → 群消息：天气、主要矛盾、今天的动作、最值得交易的新增信息、异动没原因、时点。"""
     wd = WEEKDAY[datetime.fromisoformat(day).weekday()]
@@ -56,13 +66,35 @@ def multi_text(d: dict, day: str) -> str:
         if r.get("data"):
             line += f"（{r['data']}）"
         out.append(line)
-    for r in watch[:4]:
-        out.append(f"观察 {r.get('sym', '')}：{r.get('what', '')}；{r.get('action', '')}")
-    top = d.get("top") or []
-    if top:
-        out += ["", "最值得交易的新增信息（否定线 / 确认线）："]
-        for r in top[:5]:
-            out.append(f"{r.get('sym', '')}：{r.get('tape', '')}")
+    top = (d.get("top") or [])[:5]
+    rows = {r.get("id"): r for k in ("do", "cond", "watch", "skip") for r in d.get(k) or []}
+    if top:   # 每只票先说今天的消息，再给否定线 / 确认线（river 11-10：多日卡「什么都没提取」）
+        out += ["", "最值得交易的新增信息："]
+        for n, t in enumerate(top, 1):
+            r = rows.get(t.get("id")) or {}
+            dec = t.get("decision") or r.get("decision") or ""
+            out.append(f"{n}. {t.get('sym', '')}{f'（{dec}）' if dec else ''}：{_cut(t.get('news') or _news(r), 110)}")
+            if t.get("tape"):
+                out.append(f"   {t['tape']}")
+    # 观察：上面没列过的、有消息的先列；同一句模板的合成一行；其余只报名字
+    shown = {t.get("id") for t in top}
+    grouped = {m.get("id") for g in d.get("groups") or [] if g.get("bucket", "watch") == "watch" for m in g.get("members") or []}
+    rest = [r for r in watch if r.get("id") not in shown and r.get("id") not in grouped]
+    newsy = [r for r in rest if _news(r) and (r.get("new_fact") or r.get("headline"))]
+    if newsy or grouped or rest:
+        out += ["", "观察："]
+    for r in newsy[:4]:
+        out.append(f"{r.get('id', '')} {r.get('sym', '')}：{_cut(_news(r), 70)}")
+    for g in d.get("groups") or []:
+        if g.get("bucket", "watch") == "watch":
+            mem = "、".join(m.get("sym", "") for m in g.get("members") or [])
+            out.append(f"{len(g.get('members') or [])} 只同一模板「{g.get('what', '')}」，各自没新消息：{mem} → {_cut(g.get('action'), 40)}")
+    left = [r for r in rest if r not in newsy[:4]]
+    unx = {u.get("sym") for u in d.get("unexplained") or []}
+    if left:
+        out.append("另有：" + "；".join(f"{r.get('sym', '')} " + ("异动原因没找到，先别按模板接" if r.get("sym") in unx
+                                         else _cut(r.get("what") or r.get("action"), 30))   # 改判原文可能带人名，群里只写「人工加入」
+                         for r in left[:6]))
     un = d.get("unexplained") or []
     if un:
         out += ["", "异动没原因，别当已知消息交易：" + "；".join(f"{r.get('sym', '')} {pct(r.get('gap'))}" for r in un[:5])]
