@@ -202,6 +202,46 @@ def _futu_up() -> bool:
 
 
 def cmd_auto(args) -> None:
+    """收盘后自动跑：成交复盘（_auto_review），然后不管复盘成没成、有没有成交，都做当天的收盘对账。"""
+    err, review = None, "ok"
+    try:
+        _auto_review(args)
+    except SystemExit as e:   # 同步失败以退出码 1 结束：对账照做（成交那栏写明没同步到），最后再把退出码交回去
+        err, review = e, "sync_failed"
+    except Exception as e:  # noqa: BLE001 - 复盘中途出错（如出报告失败）：对账照做，成交那栏写明复盘没出完
+        err, review = e, "review_failed"
+        _log(f"成交复盘中途出错 {type(e).__name__}: {e}")
+    finally:
+        if getattr(args, "scheduled", False):
+            _recon(_covered_day(datetime.now(tz=ET)), notify=True, review=review)
+    if err is not None:
+        raise err
+
+
+def _recon(day: date, notify: bool, allow_history: bool = False, review: str | None = None, force: bool = False) -> None:
+    """收盘对账：卡准不准、成交对不对得上卡、收盘三验。三行结论发 WQ 私聊（同一天只发一次）；任何失败只记日志。"""
+    try:
+        from . import recon
+        rec = recon.run(day, allow_history=allow_history, review=review)
+        if rec is None:
+            _log(f"{day:%m/%d} 没有日内卡，收盘对账跳过")
+            return
+        _log(f"收盘对账 {day:%m/%d} 完成")
+        if notify and (force or recon.first_notice(day)):
+            _notify(f"收盘对账 {day:%m/%d}", "\n".join(rec["summary"]))
+    except Exception as e:  # noqa: BLE001
+        _log(f"收盘对账没跑成 {type(e).__name__}: {e}")
+
+
+def cmd_recon(args) -> None:
+    """手动对账某一天（默认最近一个交易日）。--send 才发私聊；--history 允许为期权合约花富途历史额度。"""
+    day = date.fromisoformat(args.date) if args.date else _covered_day(datetime.now(tz=ET))
+    _recon(day, notify=bool(args.send), allow_history=bool(args.history))
+    out = Path.home() / "Codes" / "reports" / "收盘对账" / f"{day}.md"
+    print(out.read_text(encoding="utf-8") if out.exists() else f"{day} 没出对账（看 data/logs/recon.log）")
+
+
+def _auto_review(args) -> None:
     """收盘后自动跑：同步 → 只为「上次报告之后的新期权成交」出报告 → 系统通知。
 
     用状态文件记住已报告到哪一笔成交，所以 Mac 睡过头隔天补跑、或白天手动先跑过一次，
@@ -350,6 +390,10 @@ def main() -> None:
     au = sub.add_parser("auto")
     au.add_argument("--scheduled", action="store_true",
                     help="收盘定时任务用：当天已手动复盘过就直接跳过")
+    rc = sub.add_parser("recon", help="收盘对账：卡准不准、成交对不对得上卡、收盘三验")
+    rc.add_argument("--date", default=None, help="YYYY-MM-DD，默认最近一个交易日")
+    rc.add_argument("--send", action="store_true", help="把三行结论发 WQ 私聊")
+    rc.add_argument("--history", action="store_true", help="收盘前没存到期权分钟线时，允许花富途历史额度补取")
     al = sub.add_parser("alerts", help="盘中 Telegram 提醒 / 离线回放")
     al.add_argument("--replay", metavar="YYYY-MM-DD", help="用本地分钟线离线回放")
     al.add_argument("--pins", help="回放接针名单，例如 TSLA:3.0,NVDA:2.5；省略百分数则算 ATR14")
@@ -363,5 +407,5 @@ def main() -> None:
     ld.add_argument("--push", action="store_true", help="裁判认定新事实的单条实时推群（默认关，WQ 10-25 定只进作战卡）")
     args = ap.parse_args()
     {"doctor": cmd_doctor, "sync": cmd_sync, "review": cmd_review, "day": cmd_day, "demo": cmd_demo,
-     "auto": cmd_auto, "spike": cmd_spike, "note": cmd_note, "alerts": cmd_alerts,
+     "auto": cmd_auto, "recon": cmd_recon, "spike": cmd_spike, "note": cmd_note, "alerts": cmd_alerts,
      "fupan": cmd_fupan, "leaders": cmd_leaders}[args.cmd](args)

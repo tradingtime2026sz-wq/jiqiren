@@ -127,3 +127,12 @@ cd ~/Codes/tiger-review && .venv/bin/python -m tiger_review note "SPCX 2026-10-2
 | `tiger_review/patterns.py` | 打标签、分组、诊断原因 |
 | `tiger_review/report.py` | 单文件 HTML（无 JS） |
 | `tests/` | 用确定性假行情的端到端测试 |
+
+## 收盘对账（2026-11-10 起）
+
+每个交易日 16:20 的成交复盘之后自动做，没成交、同步失败也做。回答三件事：这张日内卡今天准不准、你做的和卡对不对得上、盘前写的收盘三验成立没有。
+
+- 盘中提醒顺手做两件：09:30 把开盘那一刻的卡留底到 `~/Codes/reports/盘前作战卡/<D>/frozen/`，15:54 趁期权没到期把卡上用到的期权和标的的一分钟线存进去。
+- 产物在 `~/Codes/reports/收盘对账/`：`<D>.md`（第 1 行结论）、`<D>.json`、`对账账本.csv`（每个进攻候选一行）、`成交对卡.csv`（每笔成交一行，只有输赢和百分比，没有金额）。三行结论发私聊，同一天只发一次。
+- 手动：`.venv/bin/python -m tiger_review recon [--date YYYY-MM-DD] [--send] [--history]`（`--history` 才允许为期权合约花富途历史额度）。
+- 口径和取舍写在 `tiger_review/recon.py` 顶部。

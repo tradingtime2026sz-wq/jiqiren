@@ -198,8 +198,8 @@ class Card:
     ret5: float | None = None
 
 
-def load_card(day: date, manual: list[dict] | None = None) -> Card:
-    path = CARDS / str(day) / "odte.json"
+def load_card(day: date, manual: list[dict] | None = None, source: Path | None = None) -> Card:
+    path = source or CARDS / str(day) / "odte.json"   # source：收盘对账回放用留底那版卡
     try:
         raw = json.loads(path.read_text(encoding="utf-8"))
         data = raw.get("intraday_alerts")
@@ -785,11 +785,26 @@ class LiveFeed:
         return quotes, bars
 
 
+def _grab_in_background(day: date) -> None:
+    """趁期权还没到期，把卡上用到的期权和标的的一分钟线存下来。放后台线程、自己开连接：卡住或失败都不影响提醒这一轮。"""
+    import threading
+
+    def work() -> None:
+        try:
+            from . import recon
+            recon.grab(day)
+        except Exception as exc:  # noqa: BLE001
+            log(f"收盘前取数没成（{type(exc).__name__}），收盘对账的期权倍数可能留空")
+
+    threading.Thread(target=work, name="recon-grab", daemon=True).start()
+
+
 def live(card: Card, pool: list[str], dry: bool, once: bool) -> None:
     engine = Engine(card, Telegram(dry).send, pool, persistent=not dry)
     feed = None
     vix_at = None
     seen_mtime = card_mtime(card.day)
+    recon_done = {"freeze": dry or once, "grab": dry or once}   # 收盘对账的两件顺手活：开盘留底、收盘前存分钟线
     try:
         while True:
             now = datetime.now(ET)
@@ -824,10 +839,20 @@ def live(card: Card, pool: list[str], dry: bool, once: bool) -> None:
                         engine.update_vix(info)
                 vix_at = now
             engine.startup(now)
+            if not recon_done["freeze"] and hm >= "09:30":
+                try:   # 把开盘这一刻的卡留一份；卡还没出就下一轮再试；失败不影响提醒
+                    from . import recon
+                    recon_done["freeze"] = recon.freeze(card.day) is not None
+                except Exception as exc:  # noqa: BLE001
+                    recon_done["freeze"] = True
+                    log(f"开盘留底没成（{type(exc).__name__}），收盘对账会用盘上那版卡")
             try:
                 if feed is None:
                     feed = LiveFeed(card.pins, pool)
                 quotes, bars = feed.poll(now)
+                if not recon_done["grab"] and hm >= "15:54":
+                    recon_done["grab"] = True
+                    _grab_in_background(card.day)
                 summary = f"一轮快照 {now:%Y-%m-%d %H:%M:%S %Z}：" + "；".join(
                     f"{s} {quotes[s]['last_price']}（相对昨收 {pct(ratio(quotes[s]['last_price'], quotes[s].get('prev_close_price')))}）"
                     for s in ("VIXY", "QQQ"))
