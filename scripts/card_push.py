@@ -21,6 +21,7 @@ from pathlib import Path
 from zoneinfo import ZoneInfo
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+import outgate  # noqa: E402
 import tg_send  # noqa: E402
 
 ET = ZoneInfo("America/New_York")
@@ -142,6 +143,35 @@ def send(text: str, pdf: Path, caption: str, dry: bool) -> bool:
     return ok_all
 
 
+CARD_NAME = {"multi": "多日作战卡", "intraday": "日内卡"}
+CARD_JSON = {"multi": "battle.json", "intraday": "odte.json"}
+
+
+def gate_card(key: str, text: str, day: str) -> str:
+    """发群前的两道检查（river 2026-11-10：不过就不发群，私聊报一行）。返回空串 = 可以发；否则是没过的原因。
+
+    ① 内容体检：卡是不是今天的、是不是旧卡改了日期（断言在团队仓库 automation/content-checks.json）；
+    ② 发出前检查：要发的文字有没有红灯（规则在 automation/outgoing-rules.json，按 card 这一套）。
+    """
+    ok, why = outgate.content("premarket-heat-judge", day, only=CARD_JSON[key])
+    if not ok:
+        return why
+    ok, report = outgate.lint(text, "card", source=f"card-{key}")
+    if not ok:
+        return "；".join(x.replace("[红灯] ", "") for x in report.splitlines() if x.startswith("[红灯]"))[:300]
+    return ""
+
+
+def tell_private(text: str) -> None:
+    """私聊 river 一行（固定模板，不走检查：这条就是用来报检查结果的）。"""
+    try:
+        token = (tg_send.CFG / "bot_token").read_text().strip()
+        for chat in tg_send.destinations(only_first=True):
+            tg_send.send_text(token, chat, text[:900])
+    except OSError:
+        pass
+
+
 MULTI_GATE_UNTIL = "09:05"   # 多日卡两个前提到这个点还没齐就不再等，照发并注明
 
 
@@ -179,6 +209,7 @@ def main() -> int:
     state_p = d / ".telegram_sent.json"
     state = json.loads(state_p.read_text()) if (state_p.exists() and not a.dry_run) else {}
     want = {"multi": ("battle.json", "作战卡.pdf"), "intraday": ("日内卡.html", "日内卡.pdf")}
+    blocked: dict[str, tuple[float, str]] = {}     # 没过检查的卡：key → (源文件修改时间, 原因)；文件没变就不重查
     while True:
         for key, (src, pdf) in want.items():
             if key in state or not (d / src).exists() or not (d / pdf).exists():
@@ -190,6 +221,10 @@ def main() -> int:
                     if datetime.now(ET).strftime("%H:%M") < MULTI_GATE_UNTIL:
                         continue                   # 等裁定 / TMTB 早报，到点再说
                     gate_note = f"\n（{MULTI_GATE_UNTIL} 仍缺{lack}，先发这版）"
+            src_mtime = max((d / src).stat().st_mtime, (d / CARD_JSON[key]).stat().st_mtime
+                            if (d / CARD_JSON[key]).exists() else 0.0)
+            if key in blocked and blocked[key][0] == src_mtime:
+                continue                       # 上次没过检查，卡还没改，等上游重出
             time.sleep(3)                      # 等文件写完
             if key == "multi":
                 text = multi_text(json.loads((d / src).read_text(encoding="utf-8")), day) + gate_note
@@ -197,6 +232,16 @@ def main() -> int:
             else:
                 text = intraday_text((d / src).read_text(encoding="utf-8"), day)
                 cap = f"日内卡 {day} 完整版"
+            why = gate_card(key, text, day)
+            if why:
+                first = key not in blocked or blocked[key][1] != why
+                blocked[key] = (src_mtime, why)
+                print(f"{datetime.now(ET):%H:%M:%S} {key} 没过检查，没发：{why}", flush=True)
+                if first and not a.dry_run and not a.date:
+                    tell_private(f"{CARD_NAME[key]} {day} 没过检查，没发群。\n原因：{why}\n"
+                                 f"上游改好重出我会自动补发；到 {a.until} 还没好今天就不发了。")
+                continue
+            blocked.pop(key, None)
             ok = send(text, d / pdf, cap, a.dry_run)
             print(f"{datetime.now(ET):%H:%M:%S} {key} {'发出' if ok else '发送失败'}", flush=True)
             if ok and not a.dry_run:

@@ -265,7 +265,7 @@ def format_message(who: str, it: dict, verdict: dict | None = None) -> str:
 
 def send_group(text: str) -> bool:
     sender = Path(__file__).resolve().parent.parent / "scripts" / "tg_send.py"
-    r = subprocess.run([sys.executable, str(sender), "--groups-only", "--text", text],
+    r = subprocess.run([sys.executable, str(sender), "--groups-only", "--templated", "--source", "leader-watch", "--text", text],
                        check=False, capture_output=True, timeout=120)
     return r.returncode == 0
 

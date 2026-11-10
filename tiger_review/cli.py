@@ -153,7 +153,7 @@ def _notify(title: str, text: str, attach: str | None = None) -> None:
     sender = Path(__file__).resolve().parent.parent / "scripts" / "tg_send.py"
     if not sender.exists() or not (Path.home() / ".config/telegram/bot_token").exists():
         return
-    cmd = [sys.executable, str(sender), "--only-first"]
+    cmd = [sys.executable, str(sender), "--only-first", "--templated", "--source", "tiger-review"]
     if attach and Path(attach).exists():
         cmd += ["--file", attach, "--caption", f"{title}\n{text}"[:1000]]
     else:
