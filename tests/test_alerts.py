@@ -205,6 +205,36 @@ def test_card_missing_fields_falls_back_and_put_is_skipped(tmp_path, monkeypatch
     assert a.parse_pins("TSLA:3.0,NVDA")[0]["pin_depth_pct"] == 0.03
 
 
+def test_card_refresh_swaps_pins_purges_pending_and_announces_once(tmp_path, monkeypatch):
+    """river 改判后日内卡重画：名单变了换卡、清待发、群里一行；同卡再读不吵；坏文件不换卡。"""
+    monkeypatch.setattr(a, "CARDS", tmp_path)
+    monkeypatch.setattr(a, "daily_context", lambda c: {})
+    path = tmp_path / str(DAY) / "odte.json"
+    path.parent.mkdir()
+
+    def write(names, underlyings=("QQQ",)):
+        data = dict(schema="odte-intraday-alerts.v1", panic_put=dict(premarket={}, underlyings=list(underlyings)),
+                    pin_catch=dict(names=names), session=dict(main_window=["09:30", "10:30"], flat_by="15:30"))
+        path.write_text(json.dumps({"intraday_alerts": data}))
+
+    pin = lambda s: dict(sym=s, side="Call", prev_close=100, pin_depth_pct=0.03)  # noqa: E731
+    write([pin("TSLA"), pin("NVDA")])
+    e, messages = engine(a.load_card(DAY))
+    e.state["pending"]["pin:TSLA:x"] = {"at": at("10:00").isoformat(), "lines": ["x"]}
+    e.state["pending"]["pin:NVDA:y"] = {"at": at("10:00").isoformat(), "lines": ["y"]}
+    write([pin("NVDA")], underlyings=("QQQ", "NVDA"))
+    assert a.refresh_card(e, DAY, at("10:05"), 1000.0) is True
+    assert [p["sym"] for p in e.card.pins] == ["NVDA"] and e.card.underlyings == ["QQQ", "NVDA"]
+    assert "pin:TSLA:x" not in e.state["pending"] and "pin:NVDA:y" in e.state["pending"]
+    assert len(messages) == 1 and "不再盯接针：TSLA" in messages[0][1] and "恐慌 Put 的标的现在是：QQQ、NVDA" in messages[0][1]
+    assert a.refresh_card(e, DAY, at("10:06"), 1001.0) is False  # 同一份卡：只换阈值，不发消息
+    assert len(messages) == 1
+    path.write_text("{")  # 写到一半 / 坏文件：留旧卡
+    assert a.refresh_card(e, DAY, at("10:07"), 1002.0) is False
+    assert [p["sym"] for p in e.card.pins] == ["NVDA"]
+    assert a.card_mtime(DAY) == path.stat().st_mtime and a.card_mtime(DAY + timedelta(days=1)) is None
+
+
 def test_atr_and_ret5_use_only_closed_daily_bars(monkeypatch):
     rows = [dict(time_key=str(DAY - timedelta(days=20 - i)), high=102, low=98, close=100 + i, volume=1)
             for i in range(20)]

@@ -258,6 +258,55 @@ def daily_context(card: Card) -> dict[str, list[dict]]:
     return daily
 
 
+CARD_SETTLE_SECONDS = 5   # 文件刚写（5 秒内）先不读，等 odte_card 写完整
+
+
+def card_mtime(day: date) -> float | None:
+    """当天 odte.json 的改动时间；没有文件返回 None。"""
+    try:
+        return (CARDS / str(day) / "odte.json").stat().st_mtime
+    except OSError:
+        return None
+
+
+def refresh_card(engine: "Engine", day: date, at: datetime, mtime: float) -> bool:
+    """river 盘中改判 → odte_card 重画了日内卡 → 这里重读（river 11-10：作战卡、日内卡、盘中提醒用同一版判断）。
+
+    名单没变：静默换卡（阈值可能变了），不发消息。名单变了：清掉被撤票的待发提醒，群里说一行，返回 True 让调用方重建订阅。
+    新卡读不出字段（文件坏了/写到一半）而旧卡是好的：不换，留旧卡。
+    """
+    try:
+        new = load_card(day)
+        daily_context(new)
+    except (OSError, ValueError) as exc:
+        log(f"日内卡重读失败，继续用旧卡：{type(exc).__name__}: {exc}")
+        return False
+    old = engine.card
+    if new.missing and not old.missing:
+        log("日内卡重读：新文件读不出 intraday_alerts，继续用旧卡")
+        return False
+    old_pins, new_pins = {p["sym"] for p in old.pins}, {p["sym"] for p in new.pins}
+    engine.card = new
+    if old_pins == new_pins and set(old.underlyings) == set(new.underlyings):
+        log("日内卡重读：名单没变，只换阈值")
+        return False
+    gone, added = sorted(old_pins - new_pins), sorted(new_pins - old_pins)
+    for key in list(engine.state["pending"]):
+        if key.startswith("pin:") and key.split(":")[1] in gone:
+            engine.state["pending"].pop(key)
+    lines = ["日内卡更新了（改判后重画），我按新卡盯"]
+    if gone:
+        lines.append(f"不再盯接针：{'、'.join(gone)}。之前说过的「插针了 / 可以接」对这几只不再提醒。")
+    if added:
+        lines.append(f"新增盯接针：{'、'.join(added)}。")
+    if set(old.underlyings) != set(new.underlyings):
+        lines.append(f"恐慌 Put 的标的现在是：{'、'.join(new.underlyings)}。")
+    engine.emit(f"reload:{int(mtime)}", at, lines)
+    engine.save()
+    log(f"日内卡重读：接针 {sorted(old_pins)} → {sorted(new_pins)}")
+    return True
+
+
 class Telegram:
     def __init__(self, dry: bool):
         self.dry = dry
@@ -740,6 +789,7 @@ def live(card: Card, pool: list[str], dry: bool, once: bool) -> None:
     engine = Engine(card, Telegram(dry).send, pool, persistent=not dry)
     feed = None
     vix_at = None
+    seen_mtime = card_mtime(card.day)
     try:
         while True:
             now = datetime.now(ET)
@@ -750,6 +800,14 @@ def live(card: Card, pool: list[str], dry: bool, once: bool) -> None:
                 time.sleep(min(60, (now.replace(hour=9, minute=25, second=0, microsecond=0) - now).total_seconds()))
                 continue
             started = time.monotonic()
+            # river 11-10：改判后 odte_card 重画了日内卡 → 按文件改动时间重读；名单变了换订阅并在群里说一行
+            mtime = card_mtime(card.day)
+            if mtime is not None and mtime != seen_mtime and time.time() - mtime >= CARD_SETTLE_SECONDS:
+                seen_mtime = mtime
+                if refresh_card(engine, card.day, now, mtime) and feed is not None:
+                    feed.close()
+                    feed = None
+                card = engine.card
             live_state = vixlive_state()          # 本机 VIX 看板：每轮都读（便宜），说法与看板一致
             if live_state:
                 engine.update_vix(live_state)
