@@ -349,8 +349,9 @@ class Telegram:
 
 class Engine:
     """快照负责恐慌，已收盘分钟线负责接针；状态只在真实推送时落盘。"""
-    def __init__(self, card: Card, send, pool: list[str], persistent: bool = False):
+    def __init__(self, card: Card, send, pool: list[str], persistent: bool = False, note=None):
         self.card, self.send, self.pool = card, send, pool
+        self.note = note or log   # 只留底、不发群的话写到哪（实盘写日志，试跑和回放打印）
         self.path = DATA_DIR / "raw" / f"alerts_state_{card.day}.json" if persistent else None
         self.state = {"date": str(card.day), "sent": [], "pins": {}, "vixy": [], "pending": {}}
         if self.path and self.path.exists():
@@ -391,6 +392,9 @@ class Engine:
         return False
 
     def startup(self, at: datetime) -> None:
+        """开盘前这段话只留底、不发群（river 11-18：每天几乎一样，触发了再提醒就够）。"""
+        if "startup" in self.state["sent"]:
+            return
         c = self.card
         enabled = c.premarket.get("enabled")
         stage = (self.vix.get("text") if self.vix else None) or vix_stage(number(c.premarket.get("vix")), number(c.premarket.get("vix3m")))["text"]
@@ -432,7 +436,9 @@ class Engine:
         lines.append(why)
         if c.missing:
             lines.append("今天没有日内卡；恐慌只盯 QQQ" + ("，接针用手工名单。" if c.pins else "，不盯接针。"))
-        self.emit("startup", at, lines)
+        self.note("开盘前（只留底，不发群）：" + " | ".join(" ".join(str(x).splitlines()) for x in lines[1:]))
+        self.state["sent"].append("startup")
+        self.save()
 
     def step(self, at: datetime, quotes: dict[str, dict], bars: dict[str, list[dict]]) -> None:
         hm = at.strftime("%H:%M")
@@ -716,7 +722,7 @@ def replay(card: Card, daily: dict[str, list[dict]], pool: list[str]) -> None:
             events.setdefault(row["time_key"], {})[sym] = row
     seen = {s: [] for s in series}
     totals = {s: [0.0, 0.0] for s in series}
-    engine = Engine(card, Telegram(True).send, pool)
+    engine = Engine(card, Telegram(True).send, pool, note=lambda m: print(m, flush=True))
     engine.startup(datetime.combine(card.day, datetime.min.time(), ET).replace(hour=9, minute=25))
     for stamp, changes in sorted(events.items()):
         quotes = {}
@@ -800,7 +806,8 @@ def _grab_in_background(day: date) -> None:
 
 
 def live(card: Card, pool: list[str], dry: bool, once: bool) -> None:
-    engine = Engine(card, Telegram(dry).send, pool, persistent=not dry)
+    engine = Engine(card, Telegram(dry).send, pool, persistent=not dry,
+                    note=(lambda m: print(m, flush=True)) if dry else None)
     feed = None
     vix_at = None
     seen_mtime = card_mtime(card.day)

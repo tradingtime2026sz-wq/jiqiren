@@ -379,3 +379,15 @@ def test_once_success_and_failure_exit_without_real_network(monkeypatch, capsys)
         a.live(card(), [], dry=True, once=True)
     assert exc.value.code == 1
     assert "无法连接 OpenD" in capsys.readouterr().out
+
+
+def test_startup_is_logged_not_sent():
+    """开盘前那段话只留底、不发群；一天只记一次（river 11-18）。"""
+    notes = []
+    e, messages = engine(card())
+    e.note = notes.append
+    e.startup(at("09:25"))
+    e.startup(at("09:26"))
+    assert not messages
+    assert len(notes) == 1 and notes[0].startswith("开盘前（只留底，不发群）")
+    assert "恐慌买 Put" in notes[0]

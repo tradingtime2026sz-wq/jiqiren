@@ -1,8 +1,12 @@
 #!/usr/bin/env python3
-"""每天把两张盘前卡（多日作战卡、日内卡）自动发到 Telegram 群（WQ 2026-10-24 定：只发群，不发私聊）。
+"""每天把日内卡自动发到 Telegram 群（WQ 2026-10-24 定：只发群，不发私聊）。
+
+river 2026-11-18：多日作战卡还不成熟，先不推送——默认只发日内卡；多日卡照常生成，只是不发群。
+哪天要恢复，在定时任务的命令后面加 --with-multi。
 
 用法：
-  card_push.py                      # 等今天的卡出来，出一张发一张，最晚等到 09:25 ET
+  card_push.py                      # 等今天的日内卡出来就发，最晚等到 09:25 ET
+  card_push.py --with-multi         # 多日作战卡也一起发（恢复 11-18 之前的做法）
   card_push.py --date 2026-10-23 --dry-run   # 用某天的卡试跑，只打印不发
   card_push.py --until 09:40        # 改最晚等到几点
 卡的来源：~/Codes/reports/盘前作战卡/<美东日期>/ 下的 battle.json + 作战卡.pdf、日内卡.html + 日内卡.pdf。
@@ -235,12 +239,15 @@ def main() -> int:
     ap.add_argument("--date", help="美东日期，默认今天")
     ap.add_argument("--until", default="09:25", help="最晚等到几点（美东）")
     ap.add_argument("--dry-run", action="store_true")
+    ap.add_argument("--with-multi", action="store_true", help="多日作战卡也发（默认不发，river 11-18）")
     a = ap.parse_args()
     day = a.date or datetime.now(ET).strftime("%Y-%m-%d")
     d = CARDS / day
     state_p = d / ".telegram_sent.json"
     state = json.loads(state_p.read_text()) if (state_p.exists() and not a.dry_run) else {}
-    want = {"multi": ("battle.json", "作战卡.pdf"), "intraday": ("日内卡.html", "日内卡.pdf")}
+    want = {"intraday": ("日内卡.html", "日内卡.pdf")}
+    if a.with_multi:
+        want = {"multi": ("battle.json", "作战卡.pdf"), **want}
     blocked: dict[str, tuple[float, str]] = {}     # 没过检查的卡：key → (源文件修改时间, 原因)；文件没变就不重查
     while True:
         for key, (src, pdf) in want.items():
@@ -280,7 +287,7 @@ def main() -> int:
                 state[key] = datetime.now(ET).isoformat()
                 d.mkdir(parents=True, exist_ok=True)
                 state_p.write_text(json.dumps(state, ensure_ascii=False, indent=1))
-        if len(state) == 2 or a.dry_run or a.date:
+        if all(k in state for k in want) or a.dry_run or a.date:
             missing = [k for k in want if k not in state]
             if missing and not a.dry_run:
                 print(f"{day} 没等到：{'、'.join(missing)}", flush=True)
