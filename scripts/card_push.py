@@ -250,6 +250,16 @@ def main() -> int:
         want = {"multi": ("battle.json", "作战卡.pdf"), **want}
     blocked: dict[str, tuple[float, str]] = {}     # 没过检查的卡：key → (源文件修改时间, 原因)；文件没变就不重查
     while True:
+        if state_p.exists() and not a.dry_run:
+            try:
+                latest = json.loads(state_p.read_text(encoding="utf-8"))
+                if isinstance(latest, dict):
+                    state.update(latest)
+            except (OSError, ValueError):
+                pass
+            if all(k in state for k in want):
+                print(f"{datetime.now(ET):%H:%M:%S} 日内卡已由 {state.get('intraday_by', '上游')} 发出，退出", flush=True)
+                return 0
         for key, (src, pdf) in want.items():
             if key in state or not (d / src).exists() or not (d / pdf).exists():
                 continue
