@@ -151,6 +151,59 @@ def test_pin_confirmation_requires_an_actual_later_cross_and_time_cutoff():
     assert "只当提示" in outside[0][1]
 
 
+def test_level_first_rth_bar_does_not_arrive():
+    spec = {**pin_spec(), "entry": dict(mode="level", hold_level=100)}
+    e, messages = engine(card([spec]))
+    rows = [dict(time_key=f"{DAY} 09:31:00", open=101, high=102, low=100, close=101, volume=100)]
+    e.pin(at("09:32"), spec, {"TEST": rows})
+    assert not messages and e.state["pins"]["TEST"].get("armed_at") is None
+    rows = append_bar(rows, 100, 101, 99)
+    e.pin(at("09:33"), spec, {"TEST": rows})
+    assert e.state["sent"] == ["lvl:TEST:arrived"]
+
+
+def test_level_can_rearm_below_hold_until_wrong_level_breaks():
+    spec = {**pin_spec(), "entry": dict(mode="level", hold_level=100, wrong_level=95)}
+    e, messages = engine(card([spec]))
+    rows = [dict(time_key=f"{DAY} 09:31:00", open=101, high=102, low=100, close=101, volume=100)]
+    rows = append_bar(rows, 100, 101, 99)
+    e.pin(at("09:33"), spec, {"TEST": rows}, [101] * 20)
+    assert e.state["pins"]["TEST"]["armed_at"] is not None
+    rows = append_bar(rows, 98, 100, 97)
+    e.pin(at("09:34"), spec, {"TEST": rows}, [101] * 20)
+    assert e.state["pins"]["TEST"]["armed_at"] is None
+    assert "lvl:TEST:broke" not in e.state["sent"]
+    rows = append_bar(rows, 100, 101, 99)
+    e.pin(at("09:35"), spec, {"TEST": rows}, [101] * 20)
+    rows = append_bar(rows, 102, 103, 100)
+    e.pin(at("09:36"), spec, {"TEST": rows}, [101] * 20)
+    assert e.state["sent"] == ["lvl:TEST:arrived", "lvl:TEST:confirmed"]
+    rows = append_bar(rows, 94, 96, 93)
+    e.pin(at("09:37"), spec, {"TEST": rows}, [101] * 20)
+    assert "跌破 95.00" in messages[-1][1]
+    rows = append_bar(rows, 103, 104, 100)
+    e.pin(at("09:38"), spec, {"TEST": rows}, [101] * 20)
+    assert len(messages) == 3 and e.state["pins"]["TEST"]["armed_at"] is None
+
+
+@pytest.mark.parametrize("level", [False, True])
+def test_pin_ma20_uses_prior_closes_only_for_average(level):
+    spec = pin_spec()
+    if level:
+        spec["entry"] = dict(mode="level", hold_level=100)
+    warm, warmed_messages = engine(card([spec]))
+    cold, cold_messages = engine(card([spec]))
+    rows = [dict(time_key=f"{DAY} 09:31:00", open=104, high=110, low=108, close=109, volume=100)]
+    rows = append_bar(rows, 105, 109, 104)
+    rows = append_bar(rows, 109, 110, 108)
+    for n in range(1, 4):
+        warm.step(at(f"09:{31 + n}"), {}, {"TEST": rows[:n]}, {"TEST": [10000] + [108] * 20})
+        cold.pin(at(f"09:{31 + n}"), spec, {"TEST": rows[:n]})
+    assert len(warmed_messages) == 2 and "可以接了" in warmed_messages[-1][1]
+    assert len(cold_messages) == 1
+    assert "107.95" in warmed_messages[-1][1] and "104.00" in warmed_messages[-1][1]
+
+
 def test_failed_confirmation_retries_and_persistent_state_deduplicates(tmp_path, monkeypatch):
     monkeypatch.setattr(a, "DATA_DIR", tmp_path)
     e, messages = engine(persistent=True)
@@ -289,6 +342,9 @@ def test_telegram_failure_never_prints_credential_and_uses_form(tmp_path, monkey
 
 def test_live_feed_only_uses_snapshot_and_current_completed_bars(monkeypatch):
     calls = []
+    warmup = [{**pin_bars()[0], "time_key": (at("09:09") + timedelta(minutes=i)).strftime("%Y-%m-%d %H:%M:%S"),
+               "close": 80 + i} for i in range(22)]  # 09:30 既不算 RTH，也不用于预热。
+    rows = warmup + [{**pin_bars()[0], "time_key": f"{DAY} 09:31:00"}] + pin_bars()
 
     class Connection:
         def __enter__(self):
@@ -311,7 +367,7 @@ def test_live_feed_only_uses_snapshot_and_current_completed_bars(monkeypatch):
 
         def get_cur_kline(self, code, count, kind):
             calls.append(("kline", code, count, kind))
-            return 0, pd.DataFrame(pin_bars())
+            return 0, pd.DataFrame(rows)
 
         def close(self):
             calls.append(("close",))
@@ -320,12 +376,14 @@ def test_live_feed_only_uses_snapshot_and_current_completed_bars(monkeypatch):
     monkeypatch.setitem(sys.modules, "futu", SimpleNamespace(OpenQuoteContext=Context,
                         SubType=SimpleNamespace(K_1M="1m"), KLType=SimpleNamespace(K_1M="1m"), RET_OK=0))
     feed = a.LiveFeed([pin_spec()], ["OTHER"])
-    q, b = feed.poll(at("10:10"))
+    q, b, prior = feed.poll(at("10:10"))
     feed.close()
     assert calls[0] == ("subscribe", ["US.QQQ", "US.TEST"])
     assert len([c for c in calls if c[0] == "snapshot"]) == 1
     assert set(q) == {"VIXY", "QQQ", "TEST", "OTHER"}
+    assert all(rows[0]["time_key"] == f"{DAY} 09:31:00" for rows in b.values())
     assert all(rows[-1]["time_key"] == f"{DAY} 10:09:00" for rows in b.values())
+    assert prior == {"QQQ": list(range(81, 101)), "TEST": list(range(81, 101))}
 
 
 def test_replay_is_offline_and_does_not_touch_live_state(tmp_path, monkeypatch, capsys):
@@ -354,13 +412,16 @@ def test_replay_is_offline_and_does_not_touch_live_state(tmp_path, monkeypatch, 
 def test_once_success_and_failure_exit_without_real_network(monkeypatch, capsys):
     logs = []
     monkeypatch.setattr(a, "log", logs.append)
+    monkeypatch.setattr(a, "vixlive_state", lambda: None)
+    monkeypatch.setattr(a, "fetch_vix", lambda c: {})
+    monkeypatch.setattr(a, "card_mtime", lambda day: None)
 
     class Feed:
         def __init__(self, *args):
             pass
 
         def poll(self, ts):
-            return quotes(), {}
+            return quotes(), {}, {}
 
         def close(self):
             pass

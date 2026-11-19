@@ -440,7 +440,8 @@ class Engine:
         self.state["sent"].append("startup")
         self.save()
 
-    def step(self, at: datetime, quotes: dict[str, dict], bars: dict[str, list[dict]]) -> None:
+    def step(self, at: datetime, quotes: dict[str, dict], bars: dict[str, list[dict]],
+             prior_closes: dict[str, list[float]] | None = None) -> None:
         hm = at.strftime("%H:%M")
         for key, item in list(self.state["pending"].items()):
             if key.startswith("pin:") and not "09:30" <= hm <= self.card.flat_by:
@@ -474,7 +475,7 @@ class Engine:
             self.panic(at, quotes)
         if "09:30" <= hm <= self.card.flat_by:
             for pin in self.card.pins:
-                self.pin(at, pin, bars)
+                self.pin(at, pin, bars, (prior_closes or {}).get(pin["sym"]))
         self.save()
 
     def panic(self, at: datetime, quotes: dict[str, dict]) -> None:
@@ -549,7 +550,8 @@ class Engine:
                      now + board]
         self.emit("panic_strong" if strong else "panic_weak", at, lines)
 
-    def pin(self, at: datetime, spec: dict, all_bars: dict[str, list[dict]]) -> None:
+    def pin(self, at: datetime, spec: dict, all_bars: dict[str, list[dict]],
+            prior_closes: list[float] | None = None) -> None:
         sym = spec["sym"]
         bars = all_bars.get(sym, [])
         if not bars:
@@ -560,7 +562,7 @@ class Engine:
             return
         state["last_bar"] = bar["time_key"]
         if (spec.get("entry") or {}).get("mode") == "level":
-            return self.pin_level(at, spec, bars, state)
+            return self.pin_level(at, spec, bars, state, prior_closes)
         peak_i = max(range(len(bars)), key=lambda i: float(bars[i]["high"]))
         peak = float(bars[peak_i]["high"])
         identity = f"{bars[peak_i]['time_key']}:{peak}"
@@ -612,11 +614,12 @@ class Engine:
             self.emit(arrival, at, lines)
             return  # 确认必须来自之后的一根已收盘分钟线。
         period = int(self.card.rules["ma"])
-        if bar["time_key"] <= state["armed_at"] or len(bars) < period + 1:
+        closes = ((prior_closes or [])[-20:] + [float(b["close"]) for b in bars])[-period - 1:]
+        if bar["time_key"] <= state["armed_at"] or len(closes) < period + 1:
             return
-        ma = sum(float(b["close"]) for b in bars[-period:]) / period
-        before = sum(float(b["close"]) for b in bars[-period - 1:-1]) / period
-        if float(bars[-2]["close"]) <= before and close > ma:
+        ma = sum(closes[-period:]) / period
+        before = sum(closes[:-1]) / period
+        if closes[-2] <= before and close > ma:
             lines = [f"{sym} 可以接了：1 分钟收盘站回 1 分钟 MA20 了",
                      f"怎么做：买当天到期、略虚值的 Call，进场价约 {close:.2f}；针底 {low:.2f} 跌破就走，{self.card.flat_by} 前全部了结。",
                      f"为什么：这一分钟收在 {close:.2f}，重新站上了 1 分钟 MA20 {ma:.2f}。"]
@@ -627,11 +630,13 @@ class Engine:
             self.emit(prefix + ":confirmed", at, lines)
 
 
-    def pin_level(self, at: datetime, spec: dict, bars: list[dict], state: dict) -> None:
+    def pin_level(self, at: datetime, spec: dict, bars: list[dict], state: dict,
+                  prior_closes: list[float] | None = None) -> None:
         """按剧本进（WQ 2026-11-09）：守住位 + 回到 VWAP 附近 + 1 分钟收盘重新站上 1 分钟 MA20。
         三条提醒各一天一次：破位不接 / 到位准备接 / 可以接。和日内卡、决策面板用同一份 entry。"""
         sym, entry = spec["sym"], spec.get("entry") or {}
         hold = number(entry.get("hold_level")) or number(spec.get("prev_close"))
+        wrong = number(entry.get("wrong_level"))
         bar = bars[-1]
         close, low = float(bar["close"]), float(bar["low"])
         vol = sum(float(b.get("volume") or 0) for b in bars)
@@ -643,11 +648,12 @@ class Engine:
         outside = (f"现在已过 {self.card.main_window[1]} 的主要时段，只当提示。"
                    if not self.card.main_window[0] <= bar_at.strftime("%H:%M") <= self.card.main_window[1] else "")
         prefix = f"lvl:{sym}"
-        if hold and close < hold:
+        if (wrong and close < wrong) or (not wrong and hold and close < hold):
+            broken = wrong or hold
             if prefix + ":broke" not in self.state["sent"]:
-                lines = [f"{sym} 跌破 {hold:.2f} 了：今天不接",
+                lines = [f"{sym} 跌破 {broken:.2f} 了：今天不接",
                          "怎么做：不买；已经拿着的按止损走。",
-                         f"为什么：盘前写的进法是守住 {hold:.2f} 再接，这一分钟收在 {close:.2f}，守不住就是剧本破了。"]
+                         f"为什么：盘前写的进法是守住 {broken:.2f} 再接，这一分钟收在 {close:.2f}，守不住就是剧本破了。"]
                 if spec.get("no_catch_if"):
                     lines.append(f"盘前写的不接情况：{spec['no_catch_if']}")
                 self.emit(prefix + ":broke", at, lines)
@@ -655,7 +661,10 @@ class Engine:
             return
         if prefix + ":broke" in self.state["sent"]:
             return   # 破过位，当天不再喊接
-        if state.get("armed_at") is None and low <= vwap * 1.0015 and (not hold or close >= hold):
+        if wrong and hold and close < hold:
+            state["armed_at"] = None
+            return
+        if state.get("armed_at") is None and len(bars) >= 2 and low <= vwap * 1.0015 and (not hold or close >= hold):
             state["armed_at"], state["pull_low"] = bar["time_key"], low
             lines = [f"{sym} 回到 VWAP 附近了：准备接（买 Call）",
                      f"怎么做：先别进。等 1 分钟 K 线收盘重新站上 1 分钟 MA20 我再提醒「可以接」；跌破 {hold:.2f} 就不做。" if hold else
@@ -671,15 +680,16 @@ class Engine:
             return
         state["pull_low"] = min(float(state.get("pull_low") or low), low)
         period = int(self.card.rules["ma"])
-        if bar["time_key"] <= state["armed_at"] or len(bars) < period + 1:
+        closes = ((prior_closes or [])[-20:] + [float(b["close"]) for b in bars])[-period - 1:]
+        if bar["time_key"] <= state["armed_at"] or len(closes) < period + 1:
             return
-        ma = sum(float(b["close"]) for b in bars[-period:]) / period
-        before = sum(float(b["close"]) for b in bars[-period - 1:-1]) / period
-        if float(bars[-2]["close"]) <= before and close > ma and close >= vwap and prefix + ":confirmed" not in self.state["sent"]:
+        ma = sum(closes[-period:]) / period
+        before = sum(closes[:-1]) / period
+        if closes[-2] <= before and close > ma and close >= vwap and prefix + ":confirmed" not in self.state["sent"]:
             stop = float(state["pull_low"])
             lines = [f"{sym} 可以接了：1 分钟收盘站回 1 分钟 MA20 和 VWAP 了",
                      f"怎么做：买当天到期、略虚值的 Call，进场价约 {close:.2f}；回踩低点 {stop:.2f} 跌破就走，{self.card.flat_by} 前全部了结。",
-                     f"为什么：这一分钟收在 {close:.2f}，重新站上 1 分钟 MA20 {ma:.2f} 和 VWAP {vwap:.2f}" + (f"，{hold:.2f} 一直守着。" if hold else "。")]
+                     f"为什么：这一分钟收在 {close:.2f}，重新站上 1 分钟 MA20 {ma:.2f} 和 VWAP {vwap:.2f}" + (f"，也站回了 {hold:.2f}。" if hold else "。")]
             if spec.get("no_catch_if"):
                 lines.append(f"盘前写的不接情况：{spec['no_catch_if']}")
             if outside:
@@ -689,15 +699,17 @@ class Engine:
 
 def rth(rows: list[dict], day: date, before: str | None = None) -> list[dict]:
     start, end = f"{day} 09:30:00", f"{day} 16:00:00"
-    return sorted((r for r in rows if start <= r["time_key"] <= end and (before is None or r["time_key"] < before)),
+    return sorted((r for r in rows if start < r["time_key"] <= end and (before is None or r["time_key"] < before)),
                   key=lambda r: r["time_key"])
 
 
 def replay(card: Card, daily: dict[str, list[dict]], pool: list[str]) -> None:
-    series = {}
+    series, prior_closes = {}, {}
     for sym in {"QQQ", *pool, *(p["sym"] for p in card.pins)}:
         path = MINUTES / sym / f"{card.day}.json"
-        series[sym] = rth(json.loads(path.read_text()), card.day) if path.exists() else []
+        rows = sorted(json.loads(path.read_text()), key=lambda r: r["time_key"]) if path.exists() else []
+        prior_closes[sym] = [float(r["close"]) for r in rows if r["time_key"] < f"{card.day} 09:30:00"][-20:]
+        series[sym] = rth(rows, card.day)
     previous = {s: float(rows[-1]["close"]) for s, rows in daily.items() if rows}
     vixy, prior = [], []
     with (DATA_DIR / "research" / "vixy_1m.csv").open() as fh:
@@ -734,7 +746,7 @@ def replay(card: Card, daily: dict[str, list[dict]], pool: list[str]) -> None:
             quotes[sym] = dict(last_price=row["close"], prev_close_price=previous.get(sym),
                                open_price=series[sym][0]["open"], volume=totals[sym][0], turnover=totals[sym][1])
         engine.step(datetime.fromisoformat(stamp).replace(tzinfo=ET), quotes,
-                    {s: rows for s, rows in seen.items() if rows and rows[-1]["time_key"] == stamp})
+                    {s: rows for s, rows in seen.items() if rows and rows[-1]["time_key"] == stamp}, prior_closes)
     if not engine.count:
         print("当日无触发")
     vmax = max(float(b["high"]) for b in series["VIXY"]) / previous["VIXY"] - 1
@@ -773,8 +785,8 @@ class LiveFeed:
             self.ctx.close()
             self.ctx = None
 
-    def poll(self, at: datetime) -> tuple[dict, dict]:
-        quotes, bars = {}, {}
+    def poll(self, at: datetime) -> tuple[dict, dict, dict]:
+        quotes, bars, prior_closes = {}, {}, {}
         for offset in range(0, len(self.codes), 400):
             ret, frame = self.ctx.get_market_snapshot(self.codes[offset:offset + 400])
             if ret != self.ok:
@@ -786,9 +798,11 @@ class LiveFeed:
             ret, frame = self.ctx.get_cur_kline(code, 400, self.ktype)
             if ret != self.ok:
                 raise RuntimeError(f"{code} 一分钟线读取失败，本轮跳过")
-            bars[code.removeprefix("US.")] = rth(frame.to_dict(orient="records"), at.date(),
-                                                before=at.strftime("%Y-%m-%d %H:%M:00"))
-        return quotes, bars
+            sym = code.removeprefix("US.")
+            rows = sorted(frame.to_dict(orient="records"), key=lambda r: r["time_key"])
+            prior_closes[sym] = [float(r["close"]) for r in rows if r["time_key"] < f"{at.date()} 09:30:00"][-20:]
+            bars[sym] = rth(rows, at.date(), before=at.strftime("%Y-%m-%d %H:%M:00"))
+        return quotes, bars, prior_closes
 
 
 def _grab_in_background(day: date) -> None:
@@ -856,7 +870,7 @@ def live(card: Card, pool: list[str], dry: bool, once: bool) -> None:
             try:
                 if feed is None:
                     feed = LiveFeed(card.pins, pool)
-                quotes, bars = feed.poll(now)
+                quotes, bars, prior_closes = feed.poll(now)
                 if not recon_done["grab"] and hm >= "15:54":
                     recon_done["grab"] = True
                     _grab_in_background(card.day)
@@ -865,7 +879,7 @@ def live(card: Card, pool: list[str], dry: bool, once: bool) -> None:
                     for s in ("VIXY", "QQQ"))
                 print(summary, flush=True)
                 log(summary)
-                engine.step(now, quotes, bars)
+                engine.step(now, quotes, bars, prior_closes)
             except Exception as exc:
                 # Telegram 的异常已在其内部吞掉；此处仅输出本模块生成的行情错误。
                 message = str(exc) if isinstance(exc, RuntimeError) else f"数据轮询失败（{type(exc).__name__}），本轮跳过"

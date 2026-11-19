@@ -183,7 +183,7 @@ CARD_NAME = {"multi": "多日作战卡", "intraday": "日内卡"}
 CARD_JSON = {"multi": "battle.json", "intraday": "odte.json"}
 
 
-def gate_card(key: str, text: str, day: str) -> str:
+def gate_card(key: str, text: str, day: str, dry: bool = False) -> str:
     """发群前的两道检查（river 2026-11-10：不过就不发群，私聊报一行）。返回空串 = 可以发；否则是没过的原因。
 
     ① 内容体检：卡是不是今天的、是不是旧卡改了日期（断言在团队仓库 automation/content-checks.json）；
@@ -192,7 +192,14 @@ def gate_card(key: str, text: str, day: str) -> str:
     ok, why = outgate.content("premarket-heat-judge", day, only=CARD_JSON[key])
     if not ok:
         return why
-    ok, report = outgate.lint(text, "card", source=f"card-{key}")
+    if dry:
+        checker = outgate._load("outgoing_check")
+        if checker is None:
+            return ""
+        found = checker.check(text, "card")
+        ok, report = not any(v["level"] == "fail" for v in found), checker.explain(found)
+    else:
+        ok, report = outgate.lint(text, "card", source=f"card-{key}")
     if not ok:
         return "；".join(x.replace("[红灯] ", "") for x in report.splitlines() if x.startswith("[红灯]"))[:300]
     return ""
@@ -244,22 +251,22 @@ def main() -> int:
     day = a.date or datetime.now(ET).strftime("%Y-%m-%d")
     d = CARDS / day
     state_p = d / ".telegram_sent.json"
-    state = json.loads(state_p.read_text()) if (state_p.exists() and not a.dry_run) else {}
     want = {"intraday": ("日内卡.html", "日内卡.pdf")}
     if a.with_multi:
         want = {"multi": ("battle.json", "作战卡.pdf"), **want}
     blocked: dict[str, tuple[float, str]] = {}     # 没过检查的卡：key → (源文件修改时间, 原因)；文件没变就不重查
     while True:
-        if state_p.exists() and not a.dry_run:
+        state, v2 = {}, {}
+        for path, target in ((state_p, state), (d / ".battle_v2_sent.json", v2)):
             try:
-                latest = json.loads(state_p.read_text(encoding="utf-8"))
+                latest = json.loads(path.read_text(encoding="utf-8"))
                 if isinstance(latest, dict):
-                    state.update(latest)
+                    target.update(latest)
             except (OSError, ValueError):
                 pass
-            if all(k in state for k in want):
-                print(f"{datetime.now(ET):%H:%M:%S} 日内卡已由 {state.get('intraday_by', '上游')} 发出，退出", flush=True)
-                return 0
+        if "intraday" in state or "card" in v2 or "group" in v2:
+            print(f"{day} 已由二版发出，退出", flush=True)
+            return 0
         for key, (src, pdf) in want.items():
             if key in state or not (d / src).exists() or not (d / pdf).exists():
                 continue
@@ -281,7 +288,7 @@ def main() -> int:
             else:
                 text = intraday_text((d / src).read_text(encoding="utf-8"), day)
                 cap = f"日内卡 {day} 完整版"
-            why = gate_card(key, text, day)
+            why = gate_card(key, text, day, dry=a.dry_run)
             if why:
                 first = key not in blocked or blocked[key][1] != why
                 blocked[key] = (src_mtime, why)

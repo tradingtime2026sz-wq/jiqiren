@@ -39,7 +39,8 @@ CARDS = Path.home() / "Codes" / "reports" / "盘前作战卡"
 OUT = Path.home() / "Codes" / "reports" / "收盘对账"
 MONITOR_LOG = Path.home() / "Codes" / "ai-trading-team" / "monitor-log.md"
 MINUTES = DATA_DIR / "cache" / "futu" / "1m"
-FROZEN_FILES = ("odte.json", "odte_judge.json", "odte_review.json", "battle.json", "odds.json", "quotes.json", "日内卡.html")
+FROZEN_FILES = ("odte.json", "odte_judge.json", "odte_review.json", "battle.json", "odds.json", "quotes.json", "日内卡.html",
+                "judge.json", "card.json", "review.json", "今日作战卡.html", "今日作战卡.pdf")
 MIN_HISTORY_QUOTA = 40      # 富途历史 K 线额度（30 天 300 只）剩得比这少，就不为期权合约花额度
 JUDGE_MODEL = os.environ.get("RECON_JUDGE_MODEL", "claude-haiku-5-5")
 LEDGER_COLS = ["date", "sym", "side", "contract", "card_ask", "open_px", "best_mult", "hold_mult", "rule_result",
@@ -183,7 +184,8 @@ def _grab_with(ctx, day: date, dest: Path, opt: list[str], und: list[str], KLTyp
             ret, frame = ctx.get_cur_kline(code, 1000, KLType.K_1M)
             if ret == RET_OK and len(frame):
                 got[group][code] = _rows(frame, day)
-    (dest / "option_1m.json").write_text(json.dumps(got["option"], ensure_ascii=False), encoding="utf-8")
+    if not opt or got["option"]:
+        (dest / "option_1m.json").write_text(json.dumps(got["option"], ensure_ascii=False), encoding="utf-8")
     (dest / "under_1m.json").write_text(json.dumps(got["under"], ensure_ascii=False), encoding="utf-8")
     log(f"{day} 收盘前取数：期权 {len(got['option'])}/{len(opt)} 张，标的 {len(got['under'])}/{len(und)} 只")
     return True
@@ -386,8 +388,14 @@ def market_text(m: dict | None, flat_by: str) -> str | None:
 
 def rule_replay(day: date, src: Path, under: dict) -> dict:
     """把当天一分钟线喂给盘中提醒的 Engine，看它什么时候会喊「准备接 / 可以接 / 破位不接」。"""
-    from .alerts import Engine, load_card
+    from .alerts import Engine, load_card, rth
     card = load_card(day, source=src / "odte.json")
+    prior_closes = {}
+    for sym, rows in under.items():
+        cached = _load(MINUTES / sym / f"{day}.json") or rows
+        prior_closes[sym] = [float(r["close"]) for r in sorted(cached, key=lambda r: r["time_key"])
+                             if r["time_key"] < f"{day} 09:30:00"][-20:]
+    under = {s: rth(rows, day) for s, rows in under.items()}
     events: list[dict] = []
 
     def capture(at: datetime, message: str) -> bool:
@@ -408,7 +416,8 @@ def rule_replay(day: date, src: Path, under: dict) -> dict:
             continue
         before = len(engine.state["sent"])
         for pin in card.pins:
-            engine.pin(at, pin, {s: rows for s, rows in seen.items() if rows and rows[-1]["time_key"] == stamp})
+            engine.pin(at, pin, {s: rows for s, rows in seen.items() if rows and rows[-1]["time_key"] == stamp},
+                       prior_closes.get(pin["sym"]))
         for key in engine.state["sent"][before:]:
             kind = key.rsplit(":", 1)[-1]
             sym = key.split(":")[1]
@@ -458,20 +467,22 @@ def option_rule_mult(rows: list[dict], entry_hm: str, exit_hm: str, spread_pct) 
 
 
 def gate0(day: date) -> dict:
-    """每日复盘对「上一个收盘」判的红黄绿灯（只读 monitor-log 最上面那条）。对不上日期就写未知。"""
+    """每日复盘对「上一个收盘」判的红黄绿灯，取首个含 Gate 0 的段落。对不上日期就写未知。"""
     try:
-        text = MONITOR_LOG.read_text(encoding="utf-8")
+        path = MONITOR_LOG if MONITOR_LOG.exists() else Path.home() / "Desktop/Codes/ai-trading-team/monitor-log.md"
+        text = path.read_text(encoding="utf-8")
     except OSError:
         return {"color": "未知", "why": "读不到每日复盘"}
     prev = day - timedelta(days=1)
     while prev.weekday() >= 5:
         prev -= timedelta(days=1)
-    m = re.search(rf"^##+ [^\n]*覆盖{prev}美股收盘[^\n]*$(.*?)(?=^##+ |\Z)", text, re.M | re.S)
-    if not m:
-        return {"color": "未知", "why": f"每日复盘里没有覆盖 {prev} 收盘的那一条"}
-    g = re.search(r"【Gate 0】(.{0,60})", m.group(1))
+    g = None
+    for m in re.finditer(rf"^##+ [^\n]*覆盖{prev}(?:美股)?收盘[^\n]*$(.*?)(?=^##+ |\Z)", text, re.M | re.S):
+        g = re.search(r"【Gate 0】(.{0,60})", m.group(1))
+        if g:
+            break
     if not g:
-        return {"color": "未知", "why": "那条复盘没写 Gate 0"}
+        return {"color": "未知", "why": f"每日复盘里没有覆盖 {prev} 收盘的 Gate 0"}
     line = g.group(1)
     color = "红" if re.search(r"RED|红灯", line) else "黄" if re.search(r"YELLOW|黄灯", line) else \
         "绿" if re.search(r"GREEN|绿灯", line) else "未知"
