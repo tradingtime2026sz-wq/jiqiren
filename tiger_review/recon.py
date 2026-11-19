@@ -11,6 +11,8 @@
   <D>.json / <D>.md   当天对账（.md 第 1 行是结论）
   对账账本.csv          每个进攻候选一行：卡面结果、按卡上进法的结果、方向对没对、复盘红绿灯
   成交对卡.csv          每笔成交一行：卡内 / 反向 / 卡上不进攻 / 卡外（只记输赢和百分比，不记金额）
+  大盘账本.csv          每天一行（river 11-19）：盘前方向从开盘算对没对、两个剧本哪个先触发、触发后 QQQ 走了多少、
+                        期权定的振幅和出卡后实际走的差多少。方向那一栏历史上一半一半，看的是剧本那两栏。
 
 口径：
   · 卡面结果 = 这张期权开盘第一分钟买、拿到卡上写的了结时刻（默认 15:30）是几倍，期间最高几倍。
@@ -43,6 +45,10 @@ JUDGE_MODEL = os.environ.get("RECON_JUDGE_MODEL", "claude-haiku-5-5")
 LEDGER_COLS = ["date", "sym", "side", "contract", "card_ask", "open_px", "best_mult", "hold_mult", "rule_result",
                "rule_entry", "rule_exit", "rule_mult", "under_move", "dir_right", "gate0", "bias", "frozen", "revised"]
 TRADE_COLS = ["date", "cid", "sym", "side", "label", "result", "ret"]
+# 大盘单独一本账（river 11-19）：盘前方向从开盘算对没对、两个剧本哪个先触发、照剧本做 QQQ 走了多少、期权定的振幅和实际差多少
+MARKET_COLS = ["date", "bias", "gap", "open_to_close", "dir_right", "script_hit", "hit_at", "script_side", "after_move",
+               "script_right", "implied", "move_from_card", "move_vs_implied", "day_range", "frozen"]
+SCRIPT_BY = "10:30"         # 剧本没写截止时点时的默认（主窗口收尾）
 
 
 def log(message: str) -> None:
@@ -280,6 +286,102 @@ def face_result(rows: list[dict], flat_by: str) -> dict:
     return {"open_px": round(open_px, 2), "hold_px": round(hold, 2), "best_px": round(float(best_row["high"]), 2),
             "best_at": best_row["time_key"][11:16], "hold_mult": round(hold / open_px, 2) if open_px else None,
             "best_mult": round(float(best_row["high"]) / open_px, 2) if open_px else None}
+
+
+def script_hit(rows: list[dict], script: dict) -> str | None:
+    """大盘剧本触发在哪一分钟（HH:MM）；没触发返回 None。
+
+    站上 / 跌破：截止前第一根一分钟收盘越过价位的那一分钟。守住 / 压住：到截止都没越过，记在截止那一分钟。
+    """
+    level, how = script.get("level"), script.get("dir")
+    by = str(script.get("by") or SCRIPT_BY)[:5]
+    win = [r for r in rows if r["time_key"][11:16] <= by]
+    if not win or not isinstance(level, (int, float)) or isinstance(level, bool):
+        return None
+    if how in ("站上", "跌破"):
+        for r in win:
+            c = float(r["close"])
+            if (c >= level) if how == "站上" else (c < level):
+                return r["time_key"][11:16]
+        return None
+    if how in ("守住", "压住") and rows[-1]["time_key"][11:16] >= by:      # 分钟线没走到截止就不判
+        ok = all((float(r["close"]) >= level) if how == "守住" else (float(r["close"]) <= level) for r in win)
+        return by if ok else None
+    return None
+
+
+def market_line(odte: dict, under: dict, flat_by: str) -> dict | None:
+    """大盘那一行：方向、剧本、振幅各记各的。
+
+    Args:
+        odte: 当天的卡（bias、scripts、implied、weather.qqq_close）。
+        under: 标的一分钟线，用 QQQ。
+        flat_by: 卡上的了结时刻，剧本触发后的走势算到这一分钟。
+
+    Returns:
+        一行大盘成绩；没有 QQQ 分钟线返回 None。
+    """
+    rows = under.get("QQQ") or []
+    if not rows:
+        return None
+    o, c = float(rows[0]["open"]), float(rows[-1]["close"])
+    oc = c / o - 1
+    want = {"偏多": 1, "偏空": -1}.get(odte.get("bias"))
+    prev = (odte.get("weather") or {}).get("qqq_close")
+    out = {"bias": odte.get("bias"), "gap": round(o / float(prev) - 1, 4) if prev else None, "open_to_close": round(oc, 4),
+           "dir_right": None if want is None or oc == 0 else (oc * want > 0),
+           "day_range": round((max(float(r["high"]) for r in rows) - min(float(r["low"]) for r in rows)) / o, 4)}
+    imp = odte.get("implied") or {}
+    if imp.get("pct") and imp.get("spot"):   # 期权定的是「从出卡那一刻的价到收盘」，实际也从同一个价算
+        moved = abs(c / float(imp["spot"]) - 1)
+        out.update(implied=imp["pct"], move_from_card=round(moved, 4), move_vs_implied=round(moved / imp["pct"], 2))
+    scripts = odte.get("scripts") or {}
+    hits = {}
+    for key in ("a", "b"):
+        s = scripts.get(key)
+        if not isinstance(s, dict):
+            continue
+        at = script_hit(rows, s)
+        item = {"name": s.get("name"), "side": s.get("side"), "level": s.get("level"), "dir": s.get("dir"), "hit_at": at}
+        end = _at(rows, flat_by)
+        start = _at(rows, at) if at else None
+        if start and end and end["time_key"] > start["time_key"]:
+            item["after_move"] = round(float(end["close"]) / float(start["close"]) - 1, 4)
+            sign = {"Call": 1, "Put": -1}.get(s.get("side"))
+            item["right"] = None if sign is None or item["after_move"] == 0 else (item["after_move"] * sign > 0)
+        hits[key.upper()] = item
+    if hits:
+        out["scripts"] = hits
+        fired = sorted((v["hit_at"], k) for k, v in hits.items() if v["hit_at"])
+        first = hits[fired[0][1]] if fired else {}
+        out.update(script_hit=fired[0][1] if fired else "都没触发", hit_at=first.get("hit_at"), script_side=first.get("side"),
+                   after_move=first.get("after_move"), script_right=first.get("right"))
+    return out
+
+
+def market_text(m: dict | None, flat_by: str) -> str | None:
+    """大盘那一行的人话。"""
+    if not m:
+        return None
+    parts = []
+    if m.get("dir_right") is not None:
+        parts.append(f"盘前{m['bias']}，开盘到收盘 {m['open_to_close']:+.1%}，方向{'对' if m['dir_right'] else '不对'}")
+    else:
+        parts.append(f"QQQ 开盘到收盘 {m['open_to_close']:+.1%}")
+    if m.get("script_hit") == "都没触发":
+        parts.append("两个剧本都没触发")
+    elif m.get("script_hit"):
+        s = f"剧本 {m['script_hit']} 在 {m['hit_at']} 触发"
+        if m.get("after_move") is not None:
+            s += f"，之后到 {flat_by} QQQ {m['after_move']:+.1%}"
+            if m.get("script_right") is not None:
+                s += f"，照剧本买 {m['script_side']} 方向{'对' if m['script_right'] else '不对'}"
+            elif m.get("script_side") == "不做":
+                s += "（剧本写的是不做）"
+        parts.append(s)
+    if m.get("implied"):
+        parts.append(f"期权定价 ±{m['implied']:.1%}，出卡后实际走了 {m['move_from_card']:.1%}，是定价的 {m['move_vs_implied']:.1f} 倍")
+    return "大盘：" + "；".join(parts)
 
 
 def rule_replay(day: date, src: Path, under: dict) -> dict:
@@ -666,10 +768,19 @@ def run(day: date, allow_history: bool = False, judge: bool = True, review: str 
            "revised_attacks": sorted(f"{s} {d}" for s, d in live_att) if live_att is not None else None,
            "bias": odte.get("bias"), "flat_by": flat_by, "gate0": g0, "attacks": out_att, "trades": tr,
            "checks": verdicts, "weak": panel.get("weak"), "alerts_would_fire": replay["events"], "notes": notes}
+    try:
+        rec["market"] = market_line(odte, under, flat_by)
+    except Exception as exc:  # noqa: BLE001 - 大盘那一行坏了不挡对账
+        log(f"{day} 大盘那一行没算成：{type(exc).__name__}: {exc}")
+        rec["market"] = None
     lines = summarize(rec)
     rec["summary"] = lines
+    mtext = market_text(rec["market"], flat_by)
+    rec["market_text"] = mtext
     (OUT / f"{day}.json").write_text(json.dumps(rec, ensure_ascii=False, indent=1), encoding="utf-8")
-    md = [lines[0], "", f"# 收盘对账 {day}", "", *(f"- {x}" for x in lines[1:]), ""]
+    md = [lines[0], "", f"# 收盘对账 {day}", "", *(f"- {x}" for x in lines[1:]), *([f"- {mtext}"] if mtext else []), ""]
+    if rec["market"]:
+        _upsert(OUT / "大盘账本.csv", MARKET_COLS, day, [{"date": str(day), "frozen": frozen, **rec["market"]}])
     if not frozen:
         md.append("- 注意：今天开盘时没留到底，用的是现在盘上那版卡（可能是改过的）。")
     if revised:
