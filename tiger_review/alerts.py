@@ -34,6 +34,8 @@ PIN = dict(ma=20, min_score=3, best_score=4, score=[
     dict(id="qqq_same_window_drop_ge", threshold=0.004, points=1),
 ])
 VIXY_TRIGGER, VIXY_TRIGGER_MAX, VIXY_EXCLUDE = 0.020, 0.042, 0.061
+# river 2026-11-24：阶段性不做指数开仓，盘中提醒不再推送 QQQ/SPY 等指数的接多或恐慌做空开仓提示；QQQ/VIXY 仍保留作大盘天气读数。
+INDEX_NO_TRADE = frozenset({"QQQ", "SPY", "IWM", "DIA", "TQQQ", "SQQQ", "SPX", "XSP", "NDX"})
 CBOE_UA = {"User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) Chrome/130 Safari/537.36"}
 
 
@@ -221,11 +223,17 @@ def load_card(day: date, manual: list[dict] | None = None, source: Path | None =
     rules = {**PIN, **catch.get("rules", {})}
     pins = manual if manual is not None else catch.get("names", [])
     pins = [{**p, "sym": p["sym"].upper()} for p in pins if p.get("side") == "Call" and p.get("sym")]
+    if manual is None:
+        pins = [p for p in pins if p["sym"] not in INDEX_NO_TRADE]
     pins = list({p["sym"]: p for p in pins}.values())
     if len({"QQQ", *(p["sym"] for p in pins)}) > 12:
         raise ValueError("接针票加 QQQ 超过 12 个，请缩减名单")
     session = data.get("session", {})
-    return Card(day, panic, rules, pins, list(dict.fromkeys(["QQQ", *panic.get("underlyings", [])])),
+    underlyings = list(dict.fromkeys(
+        str(s).upper() for s in panic.get("underlyings", [])
+        if str(s).strip() and str(s).upper() not in INDEX_NO_TRADE
+    ))
+    return Card(day, panic, rules, pins, underlyings,
                 panic.get("premarket") or {}, session.get("main_window", ["09:30", "10:30"]),
                 min(session.get("flat_by", "15:30"), "15:30"), missing)
 
@@ -399,9 +407,12 @@ class Engine:
         enabled = c.premarket.get("enabled")
         stage = (self.vix.get("text") if self.vix else None) or vix_stage(number(c.premarket.get("vix")), number(c.premarket.get("vix3m")))["text"]
         r5 = c.ret5
-        lines = ["开盘前：今天盯两件事",
-                 f"1. 恐慌买 Put，标的 {'、'.join(c.underlyings)}。" + ("盘前 VIX 已经高过三个月 VIX，今天不做。" if enabled is False else
-                 "怎么做：盘中 VIX 比昨天涨 5% 到 9%、QQQ 又跌到昨收下方，我再提醒；提醒了就小仓位买当天到期、略虚值的 Put，拿到收盘。")]
+        panic_line = (
+            "1. 指数阶段性不做：QQQ 与 VIX 仅作大盘天气参考，不发指数开仓提醒。" if not c.underlyings else
+            f"1. 恐慌买 Put，标的 {'、'.join(c.underlyings)}。" + ("盘前 VIX 已经高过三个月 VIX，今天不做。" if enabled is False else
+            "怎么做：盘中 VIX 比昨天涨 5% 到 9%、QQQ 又跌到昨收下方，我再提醒；提醒了就小仓位买当天到期、略虚值的 Put，拿到收盘。")
+        )
+        lines = ["开盘前：今天盯两件事", panic_line]
         if c.pins:
             parts, skipped, levels = [], [], []
             for p_ in c.pins:
@@ -435,7 +446,7 @@ class Engine:
         why += " VIX 涨过 13%，或高过三个月 VIX，就不追，那多半要反弹了。"
         lines.append(why)
         if c.missing:
-            lines.append("今天没有日内卡；恐慌只盯 QQQ" + ("，接针用手工名单。" if c.pins else "，不盯接针。"))
+            lines.append("今天没有日内卡；指数不做，不发开仓提醒" + ("，接针用手工名单。" if c.pins else "，不盯接针。"))
         self.note("开盘前（只留底，不发群）：" + " | ".join(" ".join(str(x).splitlines()) for x in lines[1:]))
         self.state["sent"].append("startup")
         self.save()
@@ -465,13 +476,13 @@ class Engine:
             hist = self.state["vixy"]
             hist[:] = [x for x in hist if x[0] >= (at - timedelta(minutes=35)).isoformat() and x[0] != stamp]
             hist.append([stamp, v])
-        if (self.vix.get("inverted") and self.vix.get("source") != "vixlive" and "09:30" <= hm <= "16:00"
-                and self.card.premarket.get("enabled") is not False):
+        if (self.card.underlyings and self.vix.get("inverted") and self.vix.get("source") != "vixlive"
+                and "09:30" <= hm <= "16:00" and self.card.premarket.get("enabled") is not False):
             self.emit("vix_inverted", at, ["VIX 刚高过了三个月 VIX：恐慌 Put 不再加",
                       "怎么做：已有的 Put 拿到收盘或见好就收，新的不开。",
                       "为什么：VIX 高过三个月 VIX（倒挂）之后，十次里约六七次是反弹，不是继续恐慌。",
                       f"现在：VIX {self.vix.get('vix'):.1f}，三个月 VIX {self.vix.get('vix3m'):.1f}。"])
-        if "09:45" <= hm <= "15:00":
+        if "09:45" <= hm <= "15:00" and self.card.underlyings:
             self.panic(at, quotes)
         if "09:30" <= hm <= self.card.flat_by:
             for pin in self.card.pins:

@@ -247,15 +247,23 @@ def test_card_missing_fields_falls_back_and_put_is_skipped(tmp_path, monkeypatch
     path.parent.mkdir()
     path.write_text(json.dumps({"intraday_alerts": {"schema": "odte-intraday-alerts.v1"}}))
     fallback = a.load_card(DAY)
-    assert fallback.missing and fallback.underlyings == ["QQQ"] and not fallback.pins
-    data = dict(schema="odte-intraday-alerts.v1", panic_put=dict(premarket=dict(enabled=False), underlyings=["TSLA"]),
-                pin_catch=dict(names=[dict(sym="TSLA", side="Call"), dict(sym="NVDA", side="Put")]),
+    assert fallback.missing and fallback.underlyings == [] and not fallback.pins
+    data = dict(schema="odte-intraday-alerts.v1", panic_put=dict(premarket=dict(enabled=False), underlyings=["QQQ", "TSLA"]),
+                pin_catch=dict(names=[dict(sym="QQQ", side="Call"), dict(sym="TSLA", side="Call"), dict(sym="NVDA", side="Put")]),
                 session=dict(main_window=["09:30", "10:30"], flat_by="15:30"))
     path.write_text(json.dumps({"intraday_alerts": data}))
     c = a.load_card(DAY)
     assert [p["sym"] for p in c.pins] == ["TSLA"]
-    assert c.underlyings == ["QQQ", "TSLA"] and c.premarket["enabled"] is False
+    assert c.underlyings == ["TSLA"] and c.premarket["enabled"] is False
     assert a.parse_pins("TSLA:3.0,NVDA")[0]["pin_depth_pct"] == 0.03
+
+
+def test_no_index_panic_alerts_when_underlyings_empty():
+    c = a.Card(DAY, dict(a.PANIC), copy.deepcopy(a.PIN), [], [], {"enabled": True}, ["09:30", "10:30"], "15:30", False, -0.04)
+    e, messages = engine(c)
+    e.step(at("10:00"), quotes(v=103), {})
+    e.step(at("10:05"), quotes(v=108), {})
+    assert not messages
 
 
 def test_card_refresh_swaps_pins_purges_pending_and_announces_once(tmp_path, monkeypatch):
@@ -265,7 +273,7 @@ def test_card_refresh_swaps_pins_purges_pending_and_announces_once(tmp_path, mon
     path = tmp_path / str(DAY) / "odte.json"
     path.parent.mkdir()
 
-    def write(names, underlyings=("QQQ",)):
+    def write(names, underlyings=()):
         data = dict(schema="odte-intraday-alerts.v1", panic_put=dict(premarket={}, underlyings=list(underlyings)),
                     pin_catch=dict(names=names), session=dict(main_window=["09:30", "10:30"], flat_by="15:30"))
         path.write_text(json.dumps({"intraday_alerts": data}))
@@ -277,9 +285,9 @@ def test_card_refresh_swaps_pins_purges_pending_and_announces_once(tmp_path, mon
     e.state["pending"]["pin:NVDA:y"] = {"at": at("10:00").isoformat(), "lines": ["y"]}
     write([pin("NVDA")], underlyings=("QQQ", "NVDA"))
     assert a.refresh_card(e, DAY, at("10:05"), 1000.0) is True
-    assert [p["sym"] for p in e.card.pins] == ["NVDA"] and e.card.underlyings == ["QQQ", "NVDA"]
+    assert [p["sym"] for p in e.card.pins] == ["NVDA"] and e.card.underlyings == ["NVDA"]
     assert "pin:TSLA:x" not in e.state["pending"] and "pin:NVDA:y" in e.state["pending"]
-    assert len(messages) == 1 and "不再盯接针：TSLA" in messages[0][1] and "恐慌 Put 的标的现在是：QQQ、NVDA" in messages[0][1]
+    assert len(messages) == 1 and "不再盯接针：TSLA" in messages[0][1] and "恐慌 Put 的标的现在是：NVDA" in messages[0][1]
     assert a.refresh_card(e, DAY, at("10:06"), 1001.0) is False  # 同一份卡：只换阈值，不发消息
     assert len(messages) == 1
     path.write_text("{")  # 写到一半 / 坏文件：留旧卡
