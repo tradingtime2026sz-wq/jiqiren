@@ -14,7 +14,7 @@ import json
 from pathlib import Path
 from datetime import date, datetime, timedelta
 
-from .config import ET, PROPS_DIR, REPORTS_DIR, Settings
+from .config import ET, PROPS_DIR, REPORTS_DIR, Settings, is_trading_day
 from .fetch import load_json, merge_orders, save_json
 from .market import Prices
 from .pipeline import run
@@ -176,7 +176,7 @@ def _covered_day(now: datetime) -> date:
     d = now.date()
     if now.hour * 60 + now.minute < 9 * 60 + 30:
         d -= timedelta(days=1)
-    while d.weekday() >= 5:
+    while not is_trading_day(d):
         d -= timedelta(days=1)
     return d
 
@@ -203,6 +203,10 @@ def _futu_up() -> bool:
 
 def cmd_auto(args) -> None:
     """收盘后自动跑：成交复盘（_auto_review），然后不管复盘成没成、有没有成交，都做当天的收盘对账。"""
+    today = datetime.now(tz=ET).date()
+    if getattr(args, "scheduled", False) and today.weekday() < 5 and not is_trading_day(today):
+        _log(f"{today:%m/%d} 美股休市，定时复盘和收盘对账跳过")   # 周末不算：Mac 睡过周五收盘、周末醒来补跑要保留
+        return
     err, review = None, "ok"
     try:
         _auto_review(args)

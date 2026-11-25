@@ -18,7 +18,7 @@ from datetime import date, datetime, timedelta
 from pathlib import Path
 from urllib import parse, request
 
-from .config import DATA_DIR, ET
+from .config import DATA_DIR, ET, close_hm, default_flat_by, grab_hm, is_trading_day
 from .market import Prices
 
 MINUTES = DATA_DIR / "cache" / "futu" / "1m"
@@ -233,9 +233,10 @@ def load_card(day: date, manual: list[dict] | None = None, source: Path | None =
         str(s).upper() for s in panic.get("underlyings", [])
         if str(s).strip() and str(s).upper() not in INDEX_NO_TRADE
     ))
+    default_flat = default_flat_by(day)
     return Card(day, panic, rules, pins, underlyings,
                 panic.get("premarket") or {}, session.get("main_window", ["09:30", "10:30"]),
-                min(session.get("flat_by", "15:30"), "15:30"), missing)
+                min(session.get("flat_by", default_flat), default_flat), missing)
 
 
 def daily_context(card: Card) -> dict[str, list[dict]]:
@@ -709,7 +710,7 @@ class Engine:
 
 
 def rth(rows: list[dict], day: date, before: str | None = None) -> list[dict]:
-    start, end = f"{day} 09:30:00", f"{day} 16:00:00"
+    start, end = f"{day} 09:30:00", f"{day} {close_hm(day)}:00"
     return sorted((r for r in rows if start < r["time_key"] <= end and (before is None or r["time_key"] < before)),
                   key=lambda r: r["time_key"])
 
@@ -837,11 +838,12 @@ def live(card: Card, pool: list[str], dry: bool, once: bool) -> None:
     vix_at = None
     seen_mtime = card_mtime(card.day)
     recon_done = {"freeze": dry or once, "grab": dry or once}   # 收盘对账的两件顺手活：开盘留底、收盘前存分钟线
+    c_hm, g_hm = close_hm(card.day), grab_hm(card.day)          # 全天市 16:00 / 15:54，半日市 13:00 / 12:54
     try:
         while True:
             now = datetime.now(ET)
             hm = now.strftime("%H:%M")
-            if not once and (now.date() != card.day or hm >= "16:00"):
+            if not once and (now.date() != card.day or hm >= c_hm):
                 return
             if not once and hm < "09:25":
                 time.sleep(min(60, (now.replace(hour=9, minute=25, second=0, microsecond=0) - now).total_seconds()))
@@ -882,7 +884,7 @@ def live(card: Card, pool: list[str], dry: bool, once: bool) -> None:
                 if feed is None:
                     feed = LiveFeed(card.pins, pool)
                 quotes, bars, prior_closes = feed.poll(now)
-                if not recon_done["grab"] and hm >= "15:54":
+                if not recon_done["grab"] and hm >= g_hm:
                     recon_done["grab"] = True
                     _grab_in_background(card.day)
                 summary = f"一轮快照 {now:%Y-%m-%d %H:%M:%S %Z}：" + "；".join(
@@ -904,7 +906,7 @@ def live(card: Card, pool: list[str], dry: bool, once: bool) -> None:
             if once:
                 return
             remaining = max(0, 60 - (time.monotonic() - started))
-            until_close = (now.replace(hour=16, minute=0, second=0, microsecond=0) - datetime.now(ET)).total_seconds()
+            until_close = (now.replace(hour=int(c_hm[:2]), minute=int(c_hm[3:5]), second=0, microsecond=0) - datetime.now(ET)).total_seconds()
             time.sleep(max(0, min(remaining, until_close)))
     finally:
         if feed:
@@ -915,6 +917,10 @@ def cmd_alerts(args) -> None:
     try:
         if args.pins is not None and not args.replay:
             raise ValueError("--pins 只用于离线回放")
+        if not args.replay and not args.once and not is_trading_day(datetime.now(ET).date()):
+            log("美股休市，盘中提醒今天不启动")
+            print("美股休市，盘中提醒今天不启动")
+            return
         if not args.replay and not args.once:
             # 提前启动时到 09:25 才读卡，避免把早晨尚未生成的日内卡判为全天缺失。
             while datetime.now(ET).strftime("%H:%M") < "09:25":

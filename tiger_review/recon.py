@@ -33,7 +33,7 @@ import subprocess
 from datetime import date, datetime, timedelta
 from pathlib import Path
 
-from .config import DATA_DIR, ET, REPORTS_DIR
+from .config import DATA_DIR, ET, REPORTS_DIR, close_hm, default_flat_by, last_bar_hm, prev_trading_day
 
 CARDS = Path.home() / "Codes" / "reports" / "盘前作战卡"
 OUT = Path.home() / "Codes" / "reports" / "收盘对账"
@@ -129,7 +129,7 @@ def attacks(src: Path) -> list[dict]:
 # ---------------- 取数 ----------------
 
 def _rows(frame, day: date) -> list[dict]:
-    start, end = f"{day} 09:30:00", f"{day} 16:00:00"
+    start, end = f"{day} 09:30:00", f"{day} {close_hm(day)}:00"
     keep = ("time_key", "open", "high", "low", "close", "volume", "turnover")
     rows = [{k: r[k] for k in keep if k in r} for r in frame.to_dict(orient="records")]
     return sorted((r for r in rows if start < r["time_key"] <= end), key=lambda r: r["time_key"])
@@ -210,13 +210,13 @@ def load_bars(day: date, att: list[dict], allow_history: bool) -> tuple[dict, di
     under = {k.removeprefix("US."): v for k, v in (_load(dest / "under_1m.json", {}) or {}).items()}
     option = dict(_load(dest / "option_1m.json", {}) or {})
     notes: list[str] = []
-    full = lambda rows: bool(rows) and rows[-1]["time_key"][11:16] >= "15:59"   # noqa: E731 - 15:54 存的那份不到收盘，要补齐
+    full = lambda rows: bool(rows) and rows[-1]["time_key"][11:16] >= last_bar_hm(day)   # noqa: E731 - 收盘前（15:54，半日市 12:54）存的那份不到收盘，要补齐
     need_u = [s for s in sorted({"QQQ", "SOXX", *(a["sym"] for a in att)}) if not full(under.get(s))]
     need_o = [a["legs"][0]["code"] for a in att if a["legs"] and not option.get(a["legs"][0]["code"])]
     for s in list(need_u):
         cached = _load(MINUTES / s / f"{day}.json")
         if cached:
-            start, end = f"{day} 09:30:00", f"{day} 16:00:00"
+            start, end = f"{day} 09:30:00", f"{day} {close_hm(day)}:00"
             rows = sorted((r for r in cached if start < r["time_key"] <= end), key=lambda r: r["time_key"])
             if full(rows):
                 under[s] = rows
@@ -473,9 +473,7 @@ def gate0(day: date) -> dict:
         text = path.read_text(encoding="utf-8")
     except OSError:
         return {"color": "未知", "why": "读不到每日复盘"}
-    prev = day - timedelta(days=1)
-    while prev.weekday() >= 5:
-        prev -= timedelta(days=1)
+    prev = prev_trading_day(day)   # 跳过周末和休市日：感恩节次日要找的是周三收盘的灯，不是周四
     g = None
     for m in re.finditer(rf"^##+ [^\n]*覆盖{prev}(?:美股)?收盘[^\n]*$(.*?)(?=^##+ |\Z)", text, re.M | re.S):
         g = re.search(r"【Gate 0】(.{0,60})", m.group(1))
@@ -499,7 +497,7 @@ def trades(day: date, att: list[dict], card_syms: set[str], review: str | None =
     if review is None:
         state = _load(DATA_DIR / "raw" / "auto_state.json", {}) or {}
         seen_at = str(state.get("reported_at") or "")[:16]
-        fresh = bool(seen_at >= f"{day}T16:00" or (_load(DATA_DIR / "raw" / "meta.json", {}) or {}).get("synced_at", "")[:16] >= f"{day}T16:00")
+        fresh = bool(seen_at >= f"{day}T{close_hm(day)}" or (_load(DATA_DIR / "raw" / "meta.json", {}) or {}).get("synced_at", "")[:16] >= f"{day}T{close_hm(day)}")
     else:
         fresh = review == "ok"
     synced = review or "manual"
@@ -732,7 +730,7 @@ def run(day: date, allow_history: bool = False, judge: bool = True, review: str 
     except Exception as exc:  # noqa: BLE001 - 进法回放坏了不挡卡面结果
         log(f"{day} 进法回放没跑成：{type(exc).__name__}: {exc}")
         notes.append("按卡上进法这一栏没算成")
-        replay = {"flat_by": "15:30", "pins": {}, "events": []}
+        replay = {"flat_by": default_flat_by(day), "pins": {}, "events": []}
     flat_by = replay["flat_by"]
     g0 = gate0(day)
     out_att = []
